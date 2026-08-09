@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# Generated vector store (never commit the Chroma DB)
+chroma_insurance/
+chroma_*/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/

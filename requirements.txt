@@ -1,0 +1,37 @@
+# NordicPaws Insurance Knowledge Assistant — pinned dependency set.
+#
+# WHY THESE VERSIONS
+# The reference project (langchain-rag) pinned the langchain 0.2.x line, but the
+# shared environment now has langchain-core 1.x installed alongside the old
+# integration packages (langchain-openai 0.1.8), which is internally broken
+# (langchain-openai 0.1.8 imports the removed `langchain_core.pydantic_v1`).
+# We standardise on the 0.3.x generation: a coherent, widely-used, stable set
+# that supports LCEL and the modern `langchain-chroma` vector store, so we can
+# drop the deprecated `model.predict()` and `db.persist()` calls.
+#
+# Recommended: install into a FRESH virtualenv to avoid disturbing the
+# reference project's environment.
+
+# --- Core runtime ---
+python-dotenv>=1.0,<2
+pydantic>=2.7,<3
+
+# --- LangChain (0.3.x coherent generation) ---
+langchain>=0.3,<0.4
+langchain-core>=0.3,<0.4
+langchain-openai>=0.2,<0.3
+langchain-text-splitters>=0.3,<0.4
+langchain-chroma>=0.1.4,<0.2
+langchain-community>=0.3,<0.4
+
+# --- Vector store & embeddings backends ---
+chromadb>=0.5,<0.6
+openai>=1.40,<2
+tiktoken>=0.7,<1
+
+# --- Testing ---
+pytest>=8,<10
+
+# NOTE (Windows): chromadb pulls in onnxruntime. If wheels are unavailable,
+# install Microsoft Visual C++ Build Tools, or `conda install onnxruntime -c conda-forge`
+# before `pip install -r requirements.txt`.
