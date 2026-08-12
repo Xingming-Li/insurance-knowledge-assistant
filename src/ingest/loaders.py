@@ -1,12 +1,12 @@
-"""Document loading for the insurance knowledge base.
+"""Document loading for the insurance knowledge base
 
-V1 supports the Markdown corpus under ``data/insurance_docs``. Documents are
-loaded recursively and enriched with metadata parsed from the standard document
-header (title, document ID, version, effective date) so that citations can later
-reference the exact source.
+This version supports the Markdown corpus under ``data/insurance_docs``.
+Documents are loaded recursively and enriched with metadata parsed from
+the standard document header (title, document ID, version, effective date)
+so that citations can later reference the exact source.
 
-The evaluation ground truth (``eval/golden_qa.jsonl`` and anything under an
-``eval`` directory) is explicitly excluded from the production knowledge base.
+The evaluation ground truth (``eval/golden_qa.jsonl`` and anything under
+the ``eval`` directory) is excluded from the production knowledge base.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def _extract_title(text: str) -> Optional[str]:
 
 
 def _extract_table_value(text: str, label: str) -> Optional[str]:
-    """Pull a value from the header metadata table row ``| Label | value |``."""
+    """Pull a value from the header metadata table row under ``| Fält | Värde |``."""
     match = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*(.+?)\s*\|", text, re.MULTILINE)
     return match.group(1).strip() if match else None
 

@@ -1,4 +1,4 @@
-"""Build the Chroma vector index from the insurance corpus.
+"""Build the Chroma vector index from the insurance corpus
 
 Run directly:
 

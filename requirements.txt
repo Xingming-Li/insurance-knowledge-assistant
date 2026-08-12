@@ -1,22 +1,20 @@
-# NordicPaws Insurance Knowledge Assistant — pinned dependency set.
-#
+# NordicPaws Insurance Knowledge Assistant — Dependency Set
+
 # WHY THESE VERSIONS
-# The reference project (langchain-rag) pinned the langchain 0.2.x line, but the
-# shared environment now has langchain-core 1.x installed alongside the old
-# integration packages (langchain-openai 0.1.8), which is internally broken
-# (langchain-openai 0.1.8 imports the removed `langchain_core.pydantic_v1`).
-# We standardise on the 0.3.x generation: a coherent, widely-used, stable set
-# that supports LCEL and the modern `langchain-chroma` vector store, so we can
-# drop the deprecated `model.predict()` and `db.persist()` calls.
-#
-# Recommended: install into a FRESH virtualenv to avoid disturbing the
-# reference project's environment.
+# The base project (langchain-rag) pinned the langchain 0.2.x line, but
+# the venv has langchain-core 1.4.3 installed alongside the old
+# integration packages (e.g., langchain-openai 0.1.8).
+# For this demo, I standardise on the langchain 0.3.x generation that
+# supports LCEL and the modern langchain-chroma vector store.
+
+# Recommended: install into a FRESH venv to avoid disturbing the old
+# project's environment.
 
 # --- Core runtime ---
 python-dotenv>=1.0,<2
 pydantic>=2.7,<3
 
-# --- LangChain (0.3.x coherent generation) ---
+# --- LangChain (0.3.x generation) ---
 langchain>=0.3,<0.4
 langchain-core>=0.3,<0.4
 langchain-openai>=0.2,<0.3
@@ -32,6 +30,7 @@ tiktoken>=0.7,<1
 # --- Testing ---
 pytest>=8,<10
 
-# NOTE (Windows): chromadb pulls in onnxruntime. If wheels are unavailable,
-# install Microsoft Visual C++ Build Tools, or `conda install onnxruntime -c conda-forge`
-# before `pip install -r requirements.txt`.
+# NOTE (Windows): chromadb pulls in onnxruntime. If wheels are
+# unavailable, install Microsoft Visual C++ Build Tools, or
+# `conda install onnxruntime -c conda-forge` before installing this
+# dependency set.

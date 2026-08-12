@@ -1,26 +1,23 @@
-"""Structure-aware Markdown chunking.
+"""Structure-aware Markdown chunking
 
-Documents are first split on their Markdown headings so that each piece carries
-its section context (used later for citations), then size-bounded with a small
-overlap (~10-15%, a deliberate move away from the tutorial's 50% overlap).
+Documents are first split on their Markdown headings so that each piece
+carries its section context (used later for citations), then size-bounded
+with a small overlap.
 """
 from __future__ import annotations
 
 from typing import List
 
 from langchain_core.documents import Document
-from langchain_text_splitters import (
-    MarkdownHeaderTextSplitter,
-    RecursiveCharacterTextSplitter,
-)
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
-# Split on document title (#) and section (##). The section header text is kept
-# in metadata so a chunk can be cited as e.g. "6. Karenstider".
+# Split on document title (#) and section (##). The section header text
+# is kept in metadata so a chunk can be cited as e.g. "6. Karenstider".
 HEADERS_TO_SPLIT_ON = [("#", "h1"), ("##", "section")]
 
 
 def _section_pieces(doc: Document) -> List[Document]:
-    """Split one document into section-scoped pieces, carrying its metadata."""
+    """Split one document into section-segmented pieces, carrying its metadata."""
     splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=HEADERS_TO_SPLIT_ON,
         strip_headers=False,
