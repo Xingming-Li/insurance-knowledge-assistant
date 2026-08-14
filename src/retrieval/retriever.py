@@ -1,8 +1,8 @@
-"""Retrieval interface for the Insurance Knowledge Assistant.
+"""Retrieval interface for the Insurance Knowledge Assistant
 
-V1 does dense similarity retrieval with a configurable top-k. The class is
-structured so that a reranker, hybrid (keyword + dense) search, or query
-rewriting can be layered in later without changing the calling code.
+This version does dense similarity retrieval with a configurable top-k.
+The class is structured so a reranker, hybrid (keyword + dense) search,
+or query rewriting can be added later without changing the calling code.
 """
 from __future__ import annotations
 

@@ -5,7 +5,7 @@ Run directly:
     PYTHONPATH=src python -m ingest.build_index
 
 Uses the modern ``langchain-chroma`` store, which auto-persists to
-``persist_directory`` (no deprecated ``db.persist()`` call needed).
+``persist_directory``.
 """
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ import shutil
 import sys
 from pathlib import Path
 
-# Allow direct execution (``python src/ingest/build_index.py``) by putting the
+# Allow direct execution (``python src/ingest/build_index.py``) by putting
 # ``src`` root on the path when this file is not imported as part of a package.
-if __package__ in (None, ""):  # pragma: no cover
+if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config import Settings, get_settings  # noqa: E402
-from ingest.chunking import chunk_documents  # noqa: E402
-from ingest.loaders import load_documents  # noqa: E402
+from config import Settings, get_settings
+from ingest.chunking import chunk_documents
+from ingest.loaders import load_documents  
 
 
 def build_index(settings: Settings | None = None, reset: bool = True) -> int:
