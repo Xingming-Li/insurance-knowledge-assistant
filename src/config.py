@@ -42,6 +42,7 @@ class Settings:
     # Models
     embedding_model: str
     chat_model: str
+    temperature: float
 
     # Vector store
     chroma_path: str
@@ -72,6 +73,7 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
         chat_model=os.getenv("CHAT_MODEL", "gpt-4o-mini"),
+        temperature=os.getenv("TEMPERATURE", 0.0),
         chroma_path=os.getenv("CHROMA_PATH", str(DEFAULT_CHROMA)),
         collection_name=os.getenv("CHROMA_COLLECTION", "insurance_docs"),
         chunk_size=_int_env("CHUNK_SIZE", 1000),

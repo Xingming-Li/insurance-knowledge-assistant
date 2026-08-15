@@ -1,8 +1,10 @@
-"""Answer generation: turn a question + retrieved evidence into a grounded,
-Swedish answer with structured source citations.
+"""Answer generation
 
-Citations expose document title, document ID, version and section — never raw
-file paths — so a future UI can render proper references.
+Turn a question + retrieved evidence into a grounded, Swedish answer with
+structured source citations.
+
+Citations expose document title, document ID, version and section (not raw
+file paths), so a future UI can render proper references.
 """
 from __future__ import annotations
 
@@ -15,11 +17,12 @@ from generation.prompts import INSUFFICIENT_EVIDENCE_MESSAGE, build_prompt
 
 @dataclass(frozen=True)
 class Citation:
-    """A human-presentable reference to a piece of evidence."""
+    """A reference to a piece of evidence."""
 
     title: Optional[str]
     document_id: Optional[str]
     version: Optional[str]
+    effective_date: Optional[str]
     section: Optional[str]
     source: Optional[str]
 
@@ -48,6 +51,7 @@ def build_citations(docs: Sequence[Any]) -> List[Citation]:
                 title=meta.get("title"),
                 document_id=meta.get("document_id"),
                 version=meta.get("version"),
+                effective_date=meta.get("effective_date"),
                 section=meta.get("section"),
                 source=meta.get("source") or meta.get("filename"),
             )
@@ -62,7 +66,7 @@ def format_context(docs: Sequence[Any]) -> str:
         meta = getattr(doc, "metadata", {}) or {}
         header = (
             f"[Källa {i}] {meta.get('title', '')} "
-            f"({meta.get('document_id', '')}, v{meta.get('version', '')}) "
+            f"({meta.get('document_id', '')}, v{meta.get('version', '')}, datum {meta.get('effective_date', '')}) "
             f"– Avsnitt: {meta.get('section', '')}"
         )
         blocks.append(f"{header}\n{doc.page_content}")
@@ -74,7 +78,7 @@ def _default_llm(settings: Settings):
 
     return ChatOpenAI(
         model=settings.chat_model,
-        temperature=0,
+        temperature=settings.temperature,
         api_key=settings.require_api_key(),
     )
 
@@ -87,8 +91,8 @@ def generate_answer(
 ) -> AnswerResult:
     """Generate a grounded answer. Abstains if no evidence was retrieved.
 
-    ``llm`` can be injected (any LCEL Runnable) for testing; otherwise a
-    ChatOpenAI model is created lazily from settings.
+    ``llm`` can be injected for testing, otherwise a ChatOpenAI model is
+    created lazily from settings.
     """
     settings = settings or get_settings()
     docs = list(docs or [])
