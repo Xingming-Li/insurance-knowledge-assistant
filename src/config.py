@@ -25,6 +25,13 @@ DEFAULT_DOCS = PROJECT_ROOT / "data" / "insurance_docs"
 DEFAULT_CHROMA = PROJECT_ROOT / "chroma_insurance"
 
 
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    return float(value)
+
+
 def _int_env(name: str, default: int) -> int:
     value = os.getenv(name)
     if value in (None, ""):
@@ -73,7 +80,7 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
         chat_model=os.getenv("CHAT_MODEL", "gpt-4o-mini"),
-        temperature=os.getenv("TEMPERATURE", 0.0),
+        temperature=_float_env("TEMPERATURE", 0.0),
         chroma_path=os.getenv("CHROMA_PATH", str(DEFAULT_CHROMA)),
         collection_name=os.getenv("CHROMA_COLLECTION", "insurance_docs"),
         chunk_size=_int_env("CHUNK_SIZE", 1000),
