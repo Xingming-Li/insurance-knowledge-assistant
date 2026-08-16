@@ -23,12 +23,25 @@ from ingest.chunking import chunk_documents
 from ingest.loaders import load_documents  
 
 
+def sanitize_metadata(chunks):
+    """Make chunk metadata safe for Chroma.
+
+    Chroma only accepts str/int/float/bool metadata values, so drop any key
+    whose value is None (e.g. the ``section`` of preamble blocks that appear
+    before the first ## heading).
+    """
+    for chunk in chunks:
+        chunk.metadata = {k: v for k, v in chunk.metadata.items() if v is not None}
+    return chunks
+
+
 def build_index(settings: Settings | None = None, reset: bool = True) -> int:
     """Load, chunk, embed and persist the corpus. Returns the chunk count."""
     settings = settings or get_settings()
 
     documents = load_documents(settings.docs_path)
     chunks = chunk_documents(documents, settings.chunk_size, settings.chunk_overlap)
+    chunks = sanitize_metadata(chunks)
 
     # Heavy/optional deps imported lazily so the rest of the package stays
     # importable (and unit-testable) without them.

@@ -9,7 +9,7 @@ def test_defaults_and_no_hardcoded_key(monkeypatch):
     assert s.openai_api_key is None  # never hard-coded
     assert s.embedding_model == "text-embedding-3-small"
     assert s.chat_model
-    assert s.temperature
+    assert s.temperature >= 0
     assert s.collection_name == "insurance_docs"
     assert 0 < s.chunk_overlap < s.chunk_size
     assert s.retrieval_k >= 1

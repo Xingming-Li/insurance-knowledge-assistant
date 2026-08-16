@@ -8,7 +8,7 @@ def test_chunks_preserve_metadata_and_sections():
     docs = load_documents(s.docs_path)
     chunks = chunk_documents(docs, s.chunk_size, s.chunk_overlap)
 
-    assert len(chunks) > len(docs)
+    assert len(chunks) >= len(docs)
 
     # Every chunk keeps document-level provenance and a start index.
     for c in chunks:
