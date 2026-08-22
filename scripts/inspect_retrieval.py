@@ -1,11 +1,14 @@
-"""Retrieval relevance diagnostics.
+"""Retrieval relevance diagnostics
 
-Runs every question in ``eval/golden_qa.jsonl`` through the current retriever and
-reports the vector-store relevance scores, so we can look at the ACTUAL score
-distribution for answerable vs. insufficient-evidence questions before choosing
-any abstention threshold.
+Runs every question in ``eval/golden_qa.jsonl`` through the current
+retriever and reports the vector-store relevance scores, so we can look
+at the ACTUAL score distribution for answerable vs. insufficient-evidence
+questions before choosing any abstention threshold.
 
-This script only READS from the index; it does not change retrieval behaviour.
+This script only READS from the index; it doesn't change retrieval behaviour.
+
+One measurement limitation: this script only reports document-level hits
+(expected_doc_retrieved), not section-level.
 
 Run:
     PYTHONPATH=src python scripts/inspect_retrieval.py
@@ -21,8 +24,10 @@ from statistics import mean
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-import config  # noqa: E402
-from retrieval.retriever import InsuranceRetriever  # noqa: E402
+sys.stdout.reconfigure(encoding="utf-8")
+
+import config
+from retrieval.retriever import InsuranceRetriever  
 
 GOLDEN = ROOT / "eval" / "golden_qa.jsonl"
 
@@ -36,7 +41,7 @@ def load_golden():
     return records
 
 
-def preview(text: str, n: int = 70) -> str:
+def preview(text: str, n: int = 50) -> str:
     return " ".join(text.split())[:n]
 
 

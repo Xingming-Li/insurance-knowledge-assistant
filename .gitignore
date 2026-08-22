@@ -1,9 +1,13 @@
 # Secrets
 .env
 
-# Generated vector store (never commit the Chroma DB)
+# Generated vector store
 chroma_insurance/
 chroma_*/
+
+# Generated evaluation results
+scripts/results/
+eval/results/
 
 # Python
 __pycache__/
