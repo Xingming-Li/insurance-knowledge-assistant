@@ -44,12 +44,14 @@ RESULT_KEYS = {
 _ABSTENTION_MARKERS = (
     "inte tillräcklig",
     "inte räcker",
+    "räcker inte",
     "otillräcklig",
     "kan inte besvara",
     "kan tyvärr inte besvara",
     "innehåller ingen information",
     "saknar information",
     "framgår inte av",
+    "underlaget räcker inte",
 )
 
 
@@ -154,10 +156,8 @@ def _summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             "count": len(answerable),
             "doc_hit_rate": rate(answerable, "expected_source_doc_retrieved"),
             "section_hit_rate": rate(answerable, "expected_section_retrieved"),
-            "answered_rate": round(
-                sum(1 for r in answerable if r["actual_behavior"] == "answer")
-                / len(answerable),
-                3,
+            "answered": sum(
+                1 for r in answerable if r["actual_behavior"] == "answer"
             )
             if answerable
             else None,
@@ -229,7 +229,7 @@ def print_report(payload: Dict[str, Any]) -> None:
         c = r["checks"]
 
         def mark(v):
-            return "-" if v is None else ("yes" if v else "NO")
+            return "-" if v is None else ("yes" if v else "no")
 
         preview = " ".join((r["answer"] or "").split())[:44]
         print(
@@ -244,9 +244,8 @@ def print_report(payload: Dict[str, Any]) -> None:
     a = summary["answerable"]
     ab = summary["abstain"]
     print(
-        f"behavior match: {summary['behavior_match']}/{summary['n_questions']}   "
-        f"answerable doc-hit={a['doc_hit_rate']} section-hit={a['section_hit_rate']} "
-        f"answered={a['answered_rate']}   "
-        f"abstain correct={ab['correctly_abstained']}/{ab['count']}"
+        f"behavior match: {summary['behavior_match']}/{summary['n_questions']} "
+        f"answer behavior={a['answered']}/{a['count']} abstain behavior={ab['correctly_abstained']}/{ab['count']}   "
+        f"answerable doc-hit={a['doc_hit_rate']} section-hit={a['section_hit_rate']}"
     )
     print(f"needs manual review: {', '.join(summary['needs_manual_review']) or 'none'}")
