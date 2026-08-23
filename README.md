@@ -9,7 +9,7 @@ A synthetic RAG demo for pet insurance customer service and veterinary support, 
 The assistant answers questions about:
 
 - 🐕 Dog and 🐈 Cat insurance
-- Coverage and reimbursement limits
+- Coverage and reimbursement
 - Deductibles and waiting periods
 - Veterinary care and surgery
 - Claims procedures
@@ -20,33 +20,35 @@ It is also designed to **abstain when the documents do not contain sufficient ev
 ## Current status
 
 - ✅ 6 synthetic Swedish insurance documents
-- ✅ 58 indexed chunks in Chroma
+- ✅ 12-question evaluation set
+- ✅ Metadata and source citation recording
 - ✅ Structure-aware Markdown chunking
-- ✅ Metadata and source citations
+- ✅ 58 indexed chunks in Chroma
 - ✅ Swedish grounded-generation prompt
 - ✅ Abstention behavior
-- ✅ 14 automated tests passing
-- ✅ 11-question evaluation set
+- ✅ 23 automated tests passed
 - ✅ 10/10 answerable questions retrieve expected evidence
 - ⚠️ Simple similarity threshold is **not reliable enough for abstention**
+- ⚠️ Retrieval/ranking to be improved
+- ⚠️ A Streamlit/FastAPI chat UI to be added
 
 ## Architecture
 
 ```text
 Insurance documents
-        ↓
+      ↓
 Markdown loader
-        ↓
+      ↓
 Structure-aware chunking
-        ↓
+      ↓
 OpenAI embeddings
-        ↓
-Chroma
-        ↓
+      ↓
+Chroma database
+      ↓
 Retriever
-        ↓
+      ↓
 Grounded LLM
-        ↓
+      ↓
 Answer + citations / abstention
 ```
 
@@ -59,9 +61,13 @@ insurance-knowledge-assistant/
 │   ├── config.py
 │   ├── ingest/
 │   ├── retrieval/
-│   └── generation/
+│   |── generation/
+|   └── evaluation/
 ├── eval/
-│   └── golden_qa.jsonl
+│   |── golden_qa.jsonl
+|   └── run_eval.py
+├── scripts/
+│   └── inspect_retrieval.py
 ├── tests/
 ├── .env.example
 └── requirements.txt
@@ -73,10 +79,13 @@ Create a virtual environment and install dependencies:
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env
 ```
 
-Add your `OPENAI_API_KEY` to `.env`.
+Set environment variables, including adding your `OPENAI_API_KEY` to `.env`.
+
+```bash
+cp .env.example .env
+```
 
 Run tests:
 
@@ -92,7 +101,4 @@ PYTHONPATH=src python -m ingest.build_index
 
 ## Next steps
 
-1. Add a Streamlit chat UI
-2. Improve grounded abstention
-3. Run the full evaluation harness
-4. Improve retrieval/ranking based on evaluation results
+
