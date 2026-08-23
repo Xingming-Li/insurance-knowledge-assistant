@@ -26,9 +26,8 @@ It also **abstains when the documents do not contain sufficient evidence**, for 
 - ✅ 58 indexed chunks in Chroma
 - ✅ Swedish grounded-generation prompt
 - ✅ Abstention behavior
-- ✅ 23 automated tests passed
-- ✅ 10/10 answerable questions retrieve expected evidence
-- ⚠️ Simple similarity threshold is **not reliable enough for abstention**
+- ✅ 28 automated tests passed
+- ⚠️ 6/10 answerable questions retrieve **intact**, expected evidence
 - ⚠️ Retrieval/ranking to be improved
 - ⚠️ A Streamlit/FastAPI chat UI to be added
 
@@ -97,4 +96,10 @@ Build the vector index:
 
 ```bash
 PYTHONPATH=src python -m ingest.build_index
+```
+
+Run evaluation harness:
+
+```bash
+PYTHONPATH=src python eval/run_eval.py
 ```
