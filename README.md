@@ -1,8 +1,8 @@
 # NordicPaws Försäkring — Insurance Knowledge Assistant
 
-A synthetic RAG demo for pet insurance customer service and veterinary support, built with **LangChain, OpenAI embeddings, Chroma, and Python**.
+A RAG demo for pet insurance customer service and veterinary support, built with **LangChain, OpenAI embeddings, Chroma, and Python**.
 
-> ⚠️ **Demo only:** NordicPaws Försäkring is fictional. The documents and figures are synthetic and must not be used for real insurance decisions.
+> ⚠️ **Demo only:** NordicPaws Försäkring is fictional. The documents and figures are synthetic and must not be used for real decisions.
 
 ## What it does
 
@@ -15,7 +15,7 @@ The assistant answers questions about:
 - Claims procedures
 - Exclusions and limitations
 
-It is also designed to **abstain when the documents do not contain sufficient evidence**, for example questions about premium prices or coverage abroad.
+It also **abstains when the documents do not contain sufficient evidence**, for example questions about premium prices or coverage abroad.
 
 ## Current status
 
@@ -56,7 +56,7 @@ Answer + citations / abstention
 
 ```text
 insurance-knowledge-assistant/
-├── data/insurance_docs/    # Synthetic insurance corpus
+├── data/insurance_docs/
 ├── src/
 │   ├── config.py
 │   ├── ingest/
@@ -98,7 +98,3 @@ Build the vector index:
 ```bash
 PYTHONPATH=src python -m ingest.build_index
 ```
-
-## Next steps
-
-
