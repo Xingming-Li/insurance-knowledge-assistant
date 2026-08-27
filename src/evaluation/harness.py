@@ -7,13 +7,15 @@ temperature 0, fixed model config, fixed retrieval-k.
 IMPORTANT: the golden dataset is evaluation-only. The ``expected_answer`` is
 NEVER shown to the retriever or the generation model — only ``question`` is.
 
-Automatic (non-LLM) checks:
-  * source recall  — how many required (document, section) pairs were retrieved
-                     (pair-matched, so a same-named section in another document
-                     does NOT count as a hit).
-  * answer correctness — deterministic numeric/unit matching of ``key_facts``
-                     against the generated answer. Non-numeric facts are not
-                     auto-checkable and are surfaced for manual review.
+Two quality dimensions are reported SEPARATELY:
+
+* retrieval  — pair-matched (document, section) recall. A same-named section in
+               another document does NOT count as a hit. Incomplete retrieval
+               does not, by itself, mean the answer is wrong.
+* answer     — every ``key_fact`` is evaluated. Numeric/unit-bearing facts are
+               checked deterministically; prose facts go to a semantic judge
+               that only sees the single fact + the generated answer. The facts
+               denominator is always ``len(key_facts)``.
 """
 from __future__ import annotations
 
@@ -22,17 +24,19 @@ import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from config import PROJECT_ROOT, Settings, get_settings
 from generation.answer import generate_answer
-from generation.prompts import INSUFFICIENT_EVIDENCE_MESSAGE
 from retrieval.retriever import InsuranceRetriever
 
 GOLDEN_PATH = PROJECT_ROOT / "eval" / "golden_qa.jsonl"
 DOCS_DIR = PROJECT_ROOT / "data" / "insurance_docs"
 RESULTS_DIR = PROJECT_ROOT / "eval" / "results"
 DEFAULT_RESULTS_PATH = RESULTS_DIR / "latest.json"
+
+# A fact judge is any callable (fact, answer) -> {"supported", "confidence", "reason"}.
+FactJudge = Callable[[str, str], Dict[str, Any]]
 
 # Keys guaranteed to be present on every per-question result record.
 RESULT_KEYS = {
@@ -81,7 +85,7 @@ def detect_abstention(answer: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Source recall (pair-matched)
+# Retrieval quality: source recall (pair-matched)
 # --------------------------------------------------------------------------
 
 def source_recall(
@@ -110,49 +114,43 @@ def source_recall(
     docs_hit = required_docs & retrieved_docs
 
     return {
-        "docs_retrieved": len(docs_hit),
-        "docs_required": len(required_docs),
         "docs_recall": f"{len(docs_hit)}/{len(required_docs)}",
+        "source_pair_recall": f"{len(pairs_hit)}/{len(required_pairs)}",
         "pairs_retrieved": len(pairs_hit),
         "pairs_required": len(required_pairs),
-        "pairs_recall": f"{len(pairs_hit)}/{len(required_pairs)}",
-        "complete": pairs_hit == required_pairs,
+        "complete_source_retrieval": pairs_hit == required_pairs,
         "missing_pairs": [
-            {"document_id": d, "section": s} for d, s in sorted(required_pairs - pairs_hit)
+            {"document_id": d, "section": s}
+            for d, s in sorted(required_pairs - pairs_hit)
         ],
     }
 
 
 # --------------------------------------------------------------------------
-# Answer correctness (deterministic numeric/unit matching — no LLM judge)
+# Answer quality: hybrid key-fact evaluation
 # --------------------------------------------------------------------------
 
-_NBSP = " "
-_THIN = " "
+_NBSP = " "
+_THIN = " "
 
 
 def canonical_facts(text: str) -> Set[str]:
     """Extract normalized numeric/unit tokens from Swedish insurance text.
 
-    Captures the facts that actually matter for these answers — amounts,
-    percentages and durations — normalized so that '90 000 SEK', '90 000 kr'
-    and '90000 SEK' all collapse to the same token. Deterministic and reliable;
-    it deliberately ignores prose (which is left to manual review).
+    Captures amounts, percentages and durations, normalized so that
+    '90 000 SEK', '90 000 kr' and '90000 SEK' collapse to one token.
     """
     if not text:
         return set()
     t = text.replace(_NBSP, " ").replace(_THIN, " ").lower()
     tokens: Set[str] = set()
 
-    # Percentages: "15 %" / "15%"
     for m in re.finditer(r"(\d+)\s*%", t):
         tokens.add(f"{int(m.group(1))}%")
 
-    # Money: "90 000 SEK" / "1 500 kr"
     for m in re.finditer(r"(\d[\d ]*\d|\d)\s*(sek|kr)\b", t):
         tokens.add(f"{int(m.group(1).replace(' ', ''))}sek")
 
-    # Durations: dagar / månader / veckor / år (with common Swedish suffixes)
     for m in re.finditer(
         r"(\d+)\s*(dag(?:ar|ars)?|månad(?:er|ers)?|veck(?:a|or)|år)\b", t
     ):
@@ -170,41 +168,140 @@ def canonical_facts(text: str) -> Set[str]:
     return tokens
 
 
-def answer_correctness(
-    record: Dict[str, Any], answer: str
-) -> Optional[Dict[str, Any]]:
-    """Deterministically check key_facts' numeric content against the answer.
+def deterministic_fact_check(fact: str, answer: str) -> Optional[bool]:
+    """Numeric/unit fact check. Returns None if the fact has no numeric content."""
+    fact_tokens = canonical_facts(fact)
+    if not fact_tokens:
+        return None
+    return fact_tokens <= canonical_facts(answer)
 
-    Returns None for abstention questions (key_facts there describe *why* the
-    corpus is silent, so answer correctness is not meaningful).
+
+# ---- Semantic judge (dependency-injectable) -------------------------------
+
+_JUDGE_SYSTEM = (
+    "You are a strict evaluator. You are given exactly ONE key fact and a "
+    "generated answer, both in Swedish. Decide whether the answer clearly "
+    "expresses the meaning of the key fact. Treat paraphrases and equivalent "
+    "wording as supported. Use ONLY the answer text — no outside knowledge or "
+    "assumptions. If the answer is silent about the fact, or contradicts it, or "
+    "only vaguely alludes to it, mark it unsupported. Return a confidence of "
+    "high, medium or low and a short reason."
+)
+_JUDGE_USER = "KEY FACT:\n{fact}\n\nANSWER:\n{answer}"
+
+
+class SemanticFactJudge:
+    """Default LLM-backed judge. Sees only (fact, answer). Temperature 0.
+
+    Reuses the configured chat model unless ``model`` overrides it.
+    """
+
+    def __init__(
+        self,
+        settings: Optional[Settings] = None,
+        model: Optional[str] = None,
+    ):
+        self.settings = settings or get_settings()
+        self.model = model or self.settings.judge_model
+        self._chain = None
+
+    def _get_chain(self):
+        if self._chain is None:
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_openai import ChatOpenAI
+            from pydantic import BaseModel, Field
+
+            class FactVerdict(BaseModel):
+                supported: bool = Field(description="Does the answer express the key fact?")
+                confidence: str = Field(description="high, medium or low")
+                reason: str = Field(description="Short justification")
+
+            llm = ChatOpenAI(
+                model=self.model,
+                temperature=self.settings.judge_temperature,
+                api_key=self.settings.require_api_key(),
+            )
+            prompt = ChatPromptTemplate.from_messages(
+                [("system", _JUDGE_SYSTEM), ("human", _JUDGE_USER)]
+            )
+            self._chain = prompt | llm.with_structured_output(FactVerdict)
+        return self._chain
+
+    def __call__(self, fact: str, answer: str) -> Dict[str, Any]:
+        verdict = self._get_chain().invoke({"fact": fact, "answer": answer})
+        conf = str(verdict.confidence).lower()
+        if conf not in ("high", "medium", "low"):
+            conf = "low"
+        return {
+            "supported": bool(verdict.supported),
+            "confidence": conf,
+            "reason": verdict.reason,
+        }
+
+
+def evaluate_facts(
+    record: Dict[str, Any],
+    answer: str,
+    judge: Optional[FactJudge] = None,
+) -> Optional[Dict[str, Any]]:
+    """Hybrid per-fact evaluation. Returns None for abstention questions.
+
+    Every key_fact is evaluated; the denominator is always len(key_facts).
+    Numeric facts use the deterministic checker; prose facts use ``judge``.
     """
     if record.get("expected_behavior") != "answer":
         return None
 
     key_facts = record.get("key_facts", []) or []
-    answer_tokens = canonical_facts(answer)
-
-    supported: List[str] = []
-    unsupported: List[str] = []
-    uncheckable: List[str] = []
+    fact_checks: List[Dict[str, Any]] = []
 
     for fact in key_facts:
-        fact_tokens = canonical_facts(fact)
-        if not fact_tokens:
-            uncheckable.append(fact)  # no numeric content -> needs a human
-        elif fact_tokens <= answer_tokens:
-            supported.append(fact)
+        det = deterministic_fact_check(fact, answer)
+        if det is not None:
+            fact_checks.append(
+                {
+                    "fact": fact,
+                    "method": "deterministic",
+                    "supported": det,
+                    "confidence": "high",
+                    "reason": (
+                        "numeric/unit tokens present in answer"
+                        if det
+                        else "expected numeric/unit value not found in answer"
+                    ),
+                }
+            )
+        elif judge is not None:
+            verdict = judge(fact, answer)
+            fact_checks.append(
+                {
+                    "fact": fact,
+                    "method": "semantic_judge",
+                    "supported": bool(verdict.get("supported")),
+                    "confidence": verdict.get("confidence", "low"),
+                    "reason": verdict.get("reason", ""),
+                }
+            )
         else:
-            unsupported.append(fact)
+            # No judge available: cannot verify prose fact -> flag low confidence.
+            fact_checks.append(
+                {
+                    "fact": fact,
+                    "method": "semantic_judge",
+                    "supported": False,
+                    "confidence": "low",
+                    "reason": "no judge available",
+                }
+            )
 
-    checkable = len(supported) + len(unsupported)
+    supported = sum(1 for c in fact_checks if c["supported"])
+    total = len(key_facts)
     return {
-        "key_facts_total": len(key_facts),
-        "key_facts_checkable": checkable,
-        "key_facts_supported": len(supported),
-        "facts_recall": f"{len(supported)}/{checkable}" if checkable else "0/0",
-        "unsupported_facts": unsupported,
-        "uncheckable_facts": uncheckable,
+        "fact_checks": fact_checks,
+        "supported_facts": supported,
+        "total_facts": total,
+        "facts_recall": f"{supported}/{total}",
+        "all_facts_supported": total > 0 and supported == total,
     }
 
 
@@ -217,6 +314,7 @@ def evaluate_question(
     retriever: Any,
     settings: Settings,
     llm: Any = None,
+    fact_judge: Optional[FactJudge] = None,
 ) -> Dict[str, Any]:
     """Evaluate a single golden question. Only ``question`` is fed downstream."""
     question = record["question"]
@@ -230,21 +328,31 @@ def evaluate_question(
 
     abstained = detect_abstention(result.answer) or not result.used_evidence
     actual_behavior = "abstain" if abstained else "answer"
-
-    recall = source_recall(record, retrieved_pairs)
-    correctness = answer_correctness(record, result.answer)
-    is_numeric = "calculation" in record
     behavior_matches = actual_behavior == record["expected_behavior"]
 
-    needs_manual_review = not behavior_matches
+    retrieval = source_recall(record, retrieved_pairs)
+    answer_quality = evaluate_facts(record, result.answer, judge=fact_judge)
+
+    # answer_ok: for answerable questions, all key facts supported; for
+    # abstention questions, correctness is purely the behavior match.
     if record["expected_behavior"] == "answer":
-        needs_manual_review = (
-            needs_manual_review
-            or is_numeric
-            or (recall is not None and not recall["complete"])
-            or (correctness is not None and correctness["unsupported_facts"] != [])
-            or (correctness is not None and correctness["uncheckable_facts"] != [])
+        answer_ok = bool(answer_quality and answer_quality["all_facts_supported"])
+    else:
+        answer_ok = behavior_matches
+
+    # Manual review only for genuinely unresolved cases.
+    low_confidence = bool(
+        answer_quality
+        and any(
+            c["method"] == "semantic_judge" and c["confidence"] == "low"
+            for c in answer_quality["fact_checks"]
         )
+    )
+    needs_manual_review = (
+        not behavior_matches
+        or (answer_quality is not None and not answer_quality["all_facts_supported"])
+        or low_confidence
+    )
 
     return {
         "id": record["id"],
@@ -257,11 +365,12 @@ def evaluate_question(
         "answer": result.answer,
         "citations": [asdict(c) for c in result.citations],
         "checks": {
-            "source_recall": recall,
-            "answer_correctness": correctness,
-            "abstained": abstained,
             "behavior_matches_expected": behavior_matches,
-            "is_numeric": is_numeric,
+            "abstained": abstained,
+            "is_numeric": "calculation" in record,
+            "answer_ok": answer_ok,
+            "retrieval": retrieval,
+            "answer": answer_quality,
             "needs_manual_review": needs_manual_review,
         },
     }
@@ -271,26 +380,30 @@ def _summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     answerable = [r for r in results if r["expected_behavior"] == "answer"]
     abstain = [r for r in results if r["expected_behavior"] == "abstain"]
 
-    recalls = [r["checks"]["source_recall"] for r in answerable if r["checks"]["source_recall"]]
-    complete = sum(1 for rc in recalls if rc["complete"])
-    pairs_hit = sum(rc["pairs_retrieved"] for rc in recalls)
-    pairs_req = sum(rc["pairs_required"] for rc in recalls)
+    retr = [r["checks"]["retrieval"] for r in answerable if r["checks"]["retrieval"]]
+    complete = sum(1 for rc in retr if rc["complete_source_retrieval"])
+    pairs_hit = sum(rc["pairs_retrieved"] for rc in retr)
+    pairs_req = sum(rc["pairs_required"] for rc in retr)
 
-    corrs = [r["checks"]["answer_correctness"] for r in answerable if r["checks"]["answer_correctness"]]
-    facts_sup = sum(c["key_facts_supported"] for c in corrs)
-    facts_chk = sum(c["key_facts_checkable"] for c in corrs)
+    ans = [r["checks"]["answer"] for r in answerable if r["checks"]["answer"]]
+    facts_sup = sum(a["supported_facts"] for a in ans)
+    facts_tot = sum(a["total_facts"] for a in ans)
+    all_supported = sum(1 for a in ans if a["all_facts_supported"])
 
     return {
         "n_questions": len(results),
         "behavior_match": sum(
             1 for r in results if r["checks"]["behavior_matches_expected"]
         ),
-        "answerable": {
-            "count": len(answerable),
+        "retrieval": {
+            "complete_source_retrieval": f"{complete}/{len(retr)}",
+            "source_pair_recall": f"{pairs_hit}/{pairs_req}",
+        },
+        "answer": {
             "answered": sum(1 for r in answerable if r["actual_behavior"] == "answer"),
-            "source_complete": f"{complete}/{len(recalls)}",
-            "pair_recall": f"{pairs_hit}/{pairs_req}",
-            "key_fact_recall": f"{facts_sup}/{facts_chk}",
+            "answerable": len(answerable),
+            "key_fact_recall": f"{facts_sup}/{facts_tot}",
+            "all_facts_supported": f"{all_supported}/{len(ans)}",
         },
         "abstain": {
             "count": len(abstain),
@@ -308,20 +421,26 @@ def run_evaluation(
     settings: Optional[Settings] = None,
     retriever: Any = None,
     llm: Any = None,
+    fact_judge: Optional[FactJudge] = None,
     golden_path: Path = GOLDEN_PATH,
 ) -> Dict[str, Any]:
     """Run the full evaluation and return a machine-readable payload."""
     settings = settings or get_settings()
     retriever = retriever or InsuranceRetriever(settings=settings)
+    if fact_judge is None:
+        fact_judge = SemanticFactJudge(settings=settings)
     records = load_golden(golden_path)
 
-    results = [evaluate_question(r, retriever, settings, llm=llm) for r in records]
+    results = [
+        evaluate_question(r, retriever, settings, llm=llm, fact_judge=fact_judge)
+        for r in records
+    ]
 
     meta = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "chat_model": settings.chat_model,
         "embedding_model": settings.embedding_model,
-        "temperature": settings.temperature,
+        "temperature": settings.chat_temperature,
         "retrieval_k": settings.retrieval_k,
         "collection_name": settings.collection_name,
     }
@@ -339,7 +458,7 @@ def save_results(payload: Dict[str, Any], path: Path = DEFAULT_RESULTS_PATH) -> 
 
 
 def print_report(payload: Dict[str, Any]) -> None:
-    """Human-readable console report."""
+    """Human-readable console report (retrieval and answer quality separated)."""
     meta = payload["meta"]
     summary = payload["summary"]
 
@@ -348,36 +467,36 @@ def print_report(payload: Dict[str, Any]) -> None:
         f"model={meta['chat_model']}  emb={meta['embedding_model']}  "
         f"temp={meta['temperature']}  k={meta['retrieval_k']}"
     )
-    print("=" * 104)
-    header = (
-        f"{'QID':<4} {'type':<22} {'exp':<8} {'act':<8} "
-        f"{'docs':<6} {'pairs':<7} {'facts':<7} {'review':<6}"
+    print("=" * 92)
+    print(
+        f"{'QID':<4} {'exp':<8} {'act':<8} {'pairs':<7} {'facts':<7} "
+        f"{'answer_ok':<10} {'review':<6}"
     )
-    print(header)
-    print("-" * 104)
+    print("-" * 92)
     for r in payload["results"]:
         c = r["checks"]
-        rc = c["source_recall"]
-        co = c["answer_correctness"]
-        docs = rc["docs_recall"] if rc else "-"
-        pairs = rc["pairs_recall"] if rc else "-"
-        facts = co["facts_recall"] if co else "-"
+        pairs = c["retrieval"]["source_pair_recall"] if c["retrieval"] else "-"
+        facts = c["answer"]["facts_recall"] if c["answer"] else "-"
+        answer_ok = "yes" if c["answer_ok"] else "NO"
         print(
-            f"{r['id']:<4} {str(r['type']):<22} "
-            f"{r['expected_behavior']:<8} {r['actual_behavior']:<8} "
-            f"{docs:<6} {pairs:<7} {facts:<7} "
+            f"{r['id']:<4} {r['expected_behavior']:<8} {r['actual_behavior']:<8} "
+            f"{pairs:<7} {facts:<7} {answer_ok:<10} "
             f"{('YES' if c['needs_manual_review'] else '-'):<6}"
         )
 
-    print("=" * 104)
-    a = summary["answerable"]
-    ab = summary["abstain"]
+    print("=" * 92)
+    rt, an, ab = summary["retrieval"], summary["answer"], summary["abstain"]
     print(
         f"behavior match: {summary['behavior_match']}/{summary['n_questions']}   "
-        f"answered: {a['answered']}/{a['count']}   "
-        f"source complete: {a['source_complete']}   "
-        f"pair recall: {a['pair_recall']}   "
-        f"key-fact recall: {a['key_fact_recall']}   "
+        f"answered: {an['answered']}/{an['answerable']}"
+    )
+    print(
+        f"RETRIEVAL  complete: {rt['complete_source_retrieval']}   "
+        f"pair recall: {rt['source_pair_recall']}"
+    )
+    print(
+        f"ANSWER     key-fact recall: {an['key_fact_recall']}   "
+        f"all-facts-supported: {an['all_facts_supported']}   "
         f"abstain correct: {ab['correctly_abstained']}/{ab['count']}"
     )
     print(f"needs manual review: {', '.join(summary['needs_manual_review']) or 'none'}")

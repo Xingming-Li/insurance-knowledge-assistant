@@ -78,7 +78,7 @@ def _default_llm(settings: Settings):
 
     return ChatOpenAI(
         model=settings.chat_model,
-        temperature=settings.temperature,
+        temperature=settings.chat_temperature,
         api_key=settings.require_api_key(),
     )
 

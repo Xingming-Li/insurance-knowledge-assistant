@@ -27,7 +27,7 @@ It also **abstains when the documents do not contain sufficient evidence**, for 
 - ✅ Swedish grounded-generation prompt
 - ✅ Abstention behavior
 - ✅ 28 automated tests passed
-- ⚠️ 6/10 answerable questions retrieve **intact**, expected evidence
+- ⚠️ Complete source retrieval: 6/10
 - ⚠️ Retrieval/ranking to be improved
 - ⚠️ A Streamlit/FastAPI chat UI to be added
 
