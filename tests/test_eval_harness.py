@@ -257,8 +257,8 @@ def test_incomplete_retrieval_no_review_when_facts_supported():
     assert res["checks"]["retrieval"]["complete_source_retrieval"] is False
     assert res["checks"]["is_numeric"] is True
     assert res["checks"]["answer"]["all_facts_supported"] is True
-    # Incomplete retrieval + numeric question must NOT force review here.
-    assert res["checks"]["needs_manual_review"] is False
+    # Incomplete retrieval + numeric question should force review here.
+    assert res["checks"]["needs_manual_review"] is True
 
 
 def test_abstention_bypasses_fact_judging():

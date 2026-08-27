@@ -1,8 +1,8 @@
-"""Evaluation harness for the Insurance Knowledge Assistant.
+"""Evaluation harness for the Insurance Knowledge Assistant
 
-Runs every question in ``eval/golden_qa.jsonl`` through the current retrieval
-and generation layers and records what happened. Deterministic by design:
-temperature 0, fixed model config, fixed retrieval-k.
+Runs every question in ``eval/golden_qa.jsonl`` through the retrieval and
+generation layers and records what happened. Deterministic retrieval and
+answer by design: temperature 0, fixed model config, fixed retrieval-k.
 
 IMPORTANT: the golden dataset is evaluation-only. The ``expected_answer`` is
 NEVER shown to the retriever or the generation model — only ``question`` is.
@@ -333,10 +333,10 @@ def evaluate_question(
     retrieval = source_recall(record, retrieved_pairs)
     answer_quality = evaluate_facts(record, result.answer, judge=fact_judge)
 
-    # answer_ok: for answerable questions, all key facts supported; for
-    # abstention questions, correctness is purely the behavior match.
+    # answer_ok: for answerable questions, all key facts supported and all pairs retrieved;
+    # for abstention questions, correctness is purely the behavior match.
     if record["expected_behavior"] == "answer":
-        answer_ok = bool(answer_quality and answer_quality["all_facts_supported"])
+        answer_ok = bool(retrieval["complete_source_retrieval"] and answer_quality and answer_quality["all_facts_supported"])
     else:
         answer_ok = behavior_matches
 
@@ -350,6 +350,7 @@ def evaluate_question(
     )
     needs_manual_review = (
         not behavior_matches
+        or (retrieval is not None and not retrieval["complete_source_retrieval"])
         or (answer_quality is not None and not answer_quality["all_facts_supported"])
         or low_confidence
     )
@@ -487,16 +488,16 @@ def print_report(payload: Dict[str, Any]) -> None:
     print("=" * 92)
     rt, an, ab = summary["retrieval"], summary["answer"], summary["abstain"]
     print(
-        f"behavior match: {summary['behavior_match']}/{summary['n_questions']}   "
-        f"answered: {an['answered']}/{an['answerable']}"
+        f"BEHAVIOR MATCH: {summary['behavior_match']}/{summary['n_questions']}   "
+        f"answered: {an['answered']}/{an['answerable']}   "
+        f"abstained: {ab['correctly_abstained']}/{ab['count']}"
     )
     print(
-        f"RETRIEVAL  complete: {rt['complete_source_retrieval']}   "
+        f"RETRIEVAL  all-source-retrieved: {rt['complete_source_retrieval']}   "
         f"pair recall: {rt['source_pair_recall']}"
     )
     print(
-        f"ANSWER     key-fact recall: {an['key_fact_recall']}   "
-        f"all-facts-supported: {an['all_facts_supported']}   "
-        f"abstain correct: {ab['correctly_abstained']}/{ab['count']}"
+        f"ANSWER     all-facts-supported: {an['all_facts_supported']}   "
+        f"key-fact recall: {an['key_fact_recall']}"
     )
-    print(f"needs manual review: {', '.join(summary['needs_manual_review']) or 'none'}")
+    print(f"NEEDS MANUAL REVIEW: {', '.join(summary['needs_manual_review']) or 'none'}")
