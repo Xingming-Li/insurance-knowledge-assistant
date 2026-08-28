@@ -306,6 +306,102 @@ def evaluate_facts(
 
 
 # --------------------------------------------------------------------------
+# Answer quality: calculation-output evaluation
+# --------------------------------------------------------------------------
+
+# Swedish anchor terms that identify which amount in an answer belongs to which
+# expected output field. Chosen to avoid false hits (e.g. we anchor
+# out-of-pocket on "betalar", NOT "självrisk", so the fixed deductible line does
+# not get mistaken for the customer's total cost).
+OUTPUT_ANCHORS = {
+    "reimbursement_sek": ("ersätt", "återbetal"),
+    "customer_out_of_pocket_sek": ("betalar", "egen ficka", "out-of-pocket"),
+}
+
+
+def _amounts_in(clause: str) -> List[int]:
+    """SEK amounts found in a single clause."""
+    return [
+        int(m.group(1).replace(" ", ""))
+        for m in re.finditer(r"(\d[\d ]*\d|\d)\s*(sek|kr)\b", clause)
+    ]
+
+
+def _clauses(answer: str) -> List[str]:
+    """Lowercase the answer and split into clauses.
+
+    Clause boundaries are strong punctuation and the conjunction 'och', so an
+    amount is associated only with an anchor in the SAME clause (e.g.
+    'ersättningen blir X' vs 'kunden betalar Y').
+    """
+    t = answer.replace(_NBSP, " ").replace(_THIN, " ").lower()
+    return [c for c in re.split(r"[.;,\n]| och ", t) if c.strip()]
+
+
+def _extract_output(field: str, expected: int, clauses: List[str]) -> Tuple[Any, str]:
+    """Classify the answer's value for one output field.
+
+    status is one of: 'correct', 'incorrect', 'missing', 'ambiguous'.
+    """
+    all_vals = [v for c in clauses for v in _amounts_in(c)]
+    if not all_vals:
+        return None, "missing"
+
+    anchors = OUTPUT_ANCHORS.get(field, ())
+    associated = [
+        v
+        for c in clauses
+        if anchors and any(a in c for a in anchors)
+        for v in _amounts_in(c)
+    ]
+
+    if associated:
+        distinct = set(associated)
+        if expected in distinct:
+            return expected, "correct"
+        if len(distinct) == 1:
+            return associated[0], "incorrect"
+        return sorted(distinct), "ambiguous"
+
+    # No clause pins this field: accept an exact match anywhere, else missing.
+    if expected in set(all_vals):
+        return expected, "correct"
+    return None, "missing"
+
+
+def evaluate_calculation(
+    record: Dict[str, Any], answer: str
+) -> Optional[Dict[str, Any]]:
+    """Evaluate required final calculation OUTPUTS against the answer.
+
+    Only compares final outputs (not reference steps). Returns None when the
+    record has no structured ``calculation.expected_outputs``.
+    """
+    calc = record.get("calculation") or {}
+    expected_outputs = calc.get("expected_outputs")
+    if not expected_outputs:
+        return None
+
+    clauses = _clauses(answer)
+    checks = []
+    for field, expected in expected_outputs.items():
+        actual, status = _extract_output(field, expected, clauses)
+        checks.append(
+            {"field": field, "expected": expected, "actual": actual, "status": status}
+        )
+
+    correct = sum(1 for c in checks if c["status"] == "correct")
+    total = len(checks)
+    return {
+        "calculation_checks": checks,
+        "correct_outputs": correct,
+        "total_outputs": total,
+        "all_outputs_correct": total > 0 and correct == total,
+        "ambiguous": any(c["status"] == "ambiguous" for c in checks),
+    }
+
+
+# --------------------------------------------------------------------------
 # Per-question evaluation
 # --------------------------------------------------------------------------
 
@@ -330,17 +426,31 @@ def evaluate_question(
     actual_behavior = "abstain" if abstained else "answer"
     behavior_matches = actual_behavior == record["expected_behavior"]
 
+    # Retrieval quality is a SEPARATE diagnostic; it never feeds answer_ok.
     retrieval = source_recall(record, retrieved_pairs)
-    answer_quality = evaluate_facts(record, result.answer, judge=fact_judge)
 
-    # answer_ok: for answerable questions, all key facts supported and all pairs retrieved;
-    # for abstention questions, correctness is purely the behavior match.
+    # Answer quality: key facts + calculation outputs, evaluated independently.
+    answer_quality = evaluate_facts(record, result.answer, judge=fact_judge)
+    calculation = evaluate_calculation(record, result.answer)
+
+    facts_ok = bool(answer_quality and answer_quality["all_facts_supported"])
+    calc_ok = calculation is None or calculation["all_outputs_correct"]
+    material_contradiction = bool(
+        calculation
+        and any(c["status"] == "incorrect" for c in calculation["calculation_checks"])
+    )
+
     if record["expected_behavior"] == "answer":
-        answer_ok = bool(retrieval["complete_source_retrieval"] and answer_quality and answer_quality["all_facts_supported"])
+        answer_ok = (
+            behavior_matches and facts_ok and calc_ok and not material_contradiction
+        )
     else:
         answer_ok = behavior_matches
 
-    # Manual review only for genuinely unresolved cases.
+    # Manual review ONLY when the evaluator cannot confidently decide:
+    # low-confidence semantic judgment or ambiguous numeric extraction.
+    # Wrong calculations, missing facts and incomplete retrieval are confident
+    # automatic failures, NOT review cases.
     low_confidence = bool(
         answer_quality
         and any(
@@ -348,12 +458,8 @@ def evaluate_question(
             for c in answer_quality["fact_checks"]
         )
     )
-    needs_manual_review = (
-        not behavior_matches
-        or (retrieval is not None and not retrieval["complete_source_retrieval"])
-        or (answer_quality is not None and not answer_quality["all_facts_supported"])
-        or low_confidence
-    )
+    ambiguous_calc = bool(calculation and calculation["ambiguous"])
+    needs_manual_review = low_confidence or ambiguous_calc
 
     return {
         "id": record["id"],
@@ -370,8 +476,10 @@ def evaluate_question(
             "abstained": abstained,
             "is_numeric": "calculation" in record,
             "answer_ok": answer_ok,
+            "material_contradiction": material_contradiction,
             "retrieval": retrieval,
             "answer": answer_quality,
+            "calculation": calculation,
             "needs_manual_review": needs_manual_review,
         },
     }
@@ -391,6 +499,10 @@ def _summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     facts_tot = sum(a["total_facts"] for a in ans)
     all_supported = sum(1 for a in ans if a["all_facts_supported"])
 
+    calcs = [r["checks"]["calculation"] for r in answerable if r["checks"]["calculation"]]
+    calc_correct = sum(1 for c in calcs if c["all_outputs_correct"])
+    answer_ok_count = sum(1 for r in answerable if r["checks"]["answer_ok"])
+
     return {
         "n_questions": len(results),
         "behavior_match": sum(
@@ -403,8 +515,10 @@ def _summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "answer": {
             "answered": sum(1 for r in answerable if r["actual_behavior"] == "answer"),
             "answerable": len(answerable),
+            "answer_ok": f"{answer_ok_count}/{len(answerable)}",
             "key_fact_recall": f"{facts_sup}/{facts_tot}",
             "all_facts_supported": f"{all_supported}/{len(ans)}",
+            "calculation_correct": f"{calc_correct}/{len(calcs)}",
         },
         "abstain": {
             "count": len(abstain),
@@ -468,20 +582,22 @@ def print_report(payload: Dict[str, Any]) -> None:
         f"model={meta['chat_model']}  emb={meta['embedding_model']}  "
         f"temp={meta['temperature']}  k={meta['retrieval_k']}"
     )
-    print("=" * 92)
+    print("=" * 96)
     print(
-        f"{'QID':<4} {'exp':<8} {'act':<8} {'pairs':<7} {'facts':<7} "
+        f"{'QID':<4} {'exp':<8} {'act':<8} {'pairs':<7} {'facts':<7} {'calc':<6} "
         f"{'answer_ok':<10} {'review':<6}"
     )
-    print("-" * 92)
+    print("-" * 96)
     for r in payload["results"]:
         c = r["checks"]
         pairs = c["retrieval"]["source_pair_recall"] if c["retrieval"] else "-"
         facts = c["answer"]["facts_recall"] if c["answer"] else "-"
+        cc = c["calculation"]
+        calc = f"{cc['correct_outputs']}/{cc['total_outputs']}" if cc else "-"
         answer_ok = "yes" if c["answer_ok"] else "NO"
         print(
             f"{r['id']:<4} {r['expected_behavior']:<8} {r['actual_behavior']:<8} "
-            f"{pairs:<7} {facts:<7} {answer_ok:<10} "
+            f"{pairs:<7} {facts:<7} {calc:<6} {answer_ok:<10} "
             f"{('YES' if c['needs_manual_review'] else '-'):<6}"
         )
 
@@ -497,7 +613,9 @@ def print_report(payload: Dict[str, Any]) -> None:
         f"pair recall: {rt['source_pair_recall']}"
     )
     print(
-        f"ANSWER     all-facts-supported: {an['all_facts_supported']}   "
-        f"key-fact recall: {an['key_fact_recall']}"
+        f"ANSWER     answer_ok: {an['answer_ok']}   "
+        f"all-facts-supported: {an['all_facts_supported']}   "
+        f"key-fact recall: {an['key_fact_recall']}   "
+        f"calc-correct: {an['calculation_correct']}"
     )
     print(f"NEEDS MANUAL REVIEW: {', '.join(summary['needs_manual_review']) or 'none'}")

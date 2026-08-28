@@ -8,6 +8,7 @@ from evaluation.harness import (
     canonical_facts,
     deterministic_fact_check,
     detect_abstention,
+    evaluate_calculation,
     evaluate_facts,
     evaluate_question,
     load_golden,
@@ -232,32 +233,131 @@ def test_low_confidence_triggers_manual_review():
     assert res["checks"]["needs_manual_review"] is True
 
 
-def test_incomplete_retrieval_no_review_when_facts_supported():
-    # Requires 2 pairs but retrieval returns only 1, and it's a numeric question.
-    record = {
-        "id": "T3",
-        "type": "careful_interpretation",
-        "question": "Hur mycket ersätts?",
+def _calc_record(expected_outputs, key_facts, sources):
+    return {
+        "id": "C",
+        "type": "multi_document",
+        "question": "q",
         "expected_behavior": "answer",
-        "key_facts": ["Ersättningen blir 6 800 SEK"],  # numeric -> deterministic
-        "expected_sources": [
-            {"document": "cat_insurance_terms_2026.md",
-             "document_id": "NP-CAT-TERMS-2026", "section": "3. Omfattningsnivåer"},
-            {"document": "cat_insurance_terms_2026.md",
-             "document_id": "NP-CAT-TERMS-2026", "section": "5. Självrisker"},
-        ],
-        "calculation": {"result": "6 800 SEK"},
+        "key_facts": key_facts,
+        "expected_sources": sources,
+        "calculation": {
+            "inputs": {},
+            "expected_outputs": expected_outputs,
+            "reference_steps": [],
+        },
     }
-    fake_llm = RunnableLambda(lambda _pv: "Ersättningen blir 6 800 SEK.")
-    # Only one of the two required pairs retrieved -> incomplete retrieval.
+
+
+_TWO_SOURCES = [
+    {"document": "cat_insurance_terms_2026.md",
+     "document_id": "NP-CAT-TERMS-2026", "section": "3. Omfattningsnivåer"},
+    {"document": "cat_insurance_terms_2026.md",
+     "document_id": "NP-CAT-TERMS-2026", "section": "5. Självrisker"},
+]
+
+
+def test_incomplete_retrieval_but_correct_answer_is_ok():
+    # Requires 2 pairs but retrieval returns only 1 (incomplete). Answer facts
+    # and calculation outputs are all correct -> answer_ok true, no review.
+    record = _calc_record(
+        {"reimbursement_sek": 6800},
+        key_facts=["Endast rörlig självrisk 15 %"],  # numeric -> deterministic
+        sources=_TWO_SOURCES,
+    )
+    fake_llm = RunnableLambda(
+        lambda _pv: "Endast rörlig självrisk 15 % tillämpas; ersättningen blir 6 800 SEK."
+    )
     doc = _doc(document_id="NP-CAT-TERMS-2026", section="5. Självrisker")
     res = evaluate_question(
         record, _FakeRetriever([doc]), config.get_settings(), llm=fake_llm
     )
     assert res["checks"]["retrieval"]["complete_source_retrieval"] is False
-    assert res["checks"]["is_numeric"] is True
-    assert res["checks"]["answer"]["all_facts_supported"] is True
-    # Incomplete retrieval + numeric question should force review here.
+    assert res["checks"]["answer_ok"] is True
+    assert res["checks"]["needs_manual_review"] is False
+
+
+def test_complete_retrieval_but_wrong_calculation_fails():
+    record = _calc_record(
+        {"reimbursement_sek": 6800},
+        key_facts=["Skadan ersätts"],  # prose -> judge (kept supported)
+        sources=_TWO_SOURCES,
+    )
+    fake_llm = RunnableLambda(lambda _pv: "Ersättningen blir 9 999 SEK.")
+    docs = [
+        _doc(document_id="NP-CAT-TERMS-2026", section="3. Omfattningsnivåer"),
+        _doc(document_id="NP-CAT-TERMS-2026", section="5. Självrisker"),
+    ]
+    res = evaluate_question(
+        record, _FakeRetriever(docs), config.get_settings(),
+        llm=fake_llm, fact_judge=_support_if("ers"),
+    )
+    assert res["checks"]["retrieval"]["complete_source_retrieval"] is True
+    assert res["checks"]["answer_ok"] is False
+    assert res["checks"]["material_contradiction"] is True
+    # A wrong calculation is a confident failure, not a review case.
+    assert res["checks"]["needs_manual_review"] is False
+
+
+# ---- Calculation evaluator (item 4: Q8 scenario) --------------------------
+
+_Q8_OUTPUTS = {"reimbursement_sek": 24225, "customer_out_of_pocket_sek": 5775}
+
+
+def _q8(outputs=_Q8_OUTPUTS):
+    return {"expected_behavior": "answer",
+            "calculation": {"expected_outputs": outputs}}
+
+
+def test_calculation_incorrect_outputs_detected():
+    # Generated: reimbursement 30 000, out-of-pocket 6 000 -> both incorrect.
+    answer = "Ersättningen blir 30 000 SEK och kunden betalar 6 000 SEK själv."
+    res = evaluate_calculation(_q8(), answer)
+    by = {c["field"]: c for c in res["calculation_checks"]}
+    assert by["reimbursement_sek"]["status"] == "incorrect"
+    assert by["reimbursement_sek"]["actual"] == 30000
+    assert by["customer_out_of_pocket_sek"]["status"] == "incorrect"
+    assert by["customer_out_of_pocket_sek"]["actual"] == 6000
+    assert res["correct_outputs"] == 0
+    assert res["total_outputs"] == 2
+    assert res["all_outputs_correct"] is False
+
+
+def test_calculation_correct_outputs_without_steps():
+    # Only final outputs stated, no step breakdown -> still correct.
+    answer = "Ersättningen blir 24 225 SEK och kunden betalar 5 775 SEK själv."
+    res = evaluate_calculation(_q8(), answer)
+    assert res["all_outputs_correct"] is True
+    assert res["correct_outputs"] == 2
+
+
+def test_calculation_missing_output_detected():
+    answer = "Operationen omfattas av försäkringen."  # no amounts at all
+    res = evaluate_calculation(_q8(), answer)
+    assert all(c["status"] == "missing" for c in res["calculation_checks"])
+    assert res["all_outputs_correct"] is False
+
+
+def test_calculation_ambiguous_triggers_review_and_not_ok():
+    # Two competing reimbursement values, neither the expected -> ambiguous.
+    record = _calc_record(
+        {"reimbursement_sek": 24225},
+        key_facts=["Skadan ersätts"],
+        sources=_TWO_SOURCES,
+    )
+    fake_llm = RunnableLambda(
+        lambda _pv: "Ersättningen blir 20 000 SEK eller möjligen 22 000 SEK."
+    )
+    docs = [
+        _doc(document_id="NP-CAT-TERMS-2026", section="3. Omfattningsnivåer"),
+        _doc(document_id="NP-CAT-TERMS-2026", section="5. Självrisker"),
+    ]
+    res = evaluate_question(
+        record, _FakeRetriever(docs), config.get_settings(),
+        llm=fake_llm, fact_judge=_support_if("ers"),
+    )
+    assert res["checks"]["calculation"]["ambiguous"] is True
+    assert res["checks"]["answer_ok"] is False
     assert res["checks"]["needs_manual_review"] is True
 
 
