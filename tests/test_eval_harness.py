@@ -299,66 +299,167 @@ def test_complete_retrieval_but_wrong_calculation_fails():
     assert res["checks"]["needs_manual_review"] is False
 
 
-# ---- Calculation evaluator (item 4: Q8 scenario) --------------------------
+# ---- Calculation output extraction (layered) ------------------------------
 
 _Q8_OUTPUTS = {"reimbursement_sek": 24225, "customer_out_of_pocket_sek": 5775}
+_Q10_OUTPUTS = {"reimbursement_sek": 6800, "customer_out_of_pocket_sek": 1200}
 
 
-def _q8(outputs=_Q8_OUTPUTS):
-    return {"expected_behavior": "answer",
-            "calculation": {"expected_outputs": outputs}}
+def _calc(outputs):
+    return {"expected_behavior": "answer", "calculation": {"expected_outputs": outputs}}
 
 
-def test_calculation_incorrect_outputs_detected():
-    # Generated: reimbursement 30 000, out-of-pocket 6 000 -> both incorrect.
-    answer = "Ersättningen blir 30 000 SEK och kunden betalar 6 000 SEK själv."
-    res = evaluate_calculation(_q8(), answer)
+def test_q8_labeled_outputs_incorrect_not_ambiguous():
+    # Exact Q8-style generated answer with explicit labels.
+    answer = (
+        "Ja, förhandsgodkännande krävs. "
+        "Ersättning: 30 000 SEK. Kundens självrisk: 6 000 SEK."
+    )
+    res = evaluate_calculation(_calc(_Q8_OUTPUTS), answer)
     by = {c["field"]: c for c in res["calculation_checks"]}
-    assert by["reimbursement_sek"]["status"] == "incorrect"
     assert by["reimbursement_sek"]["actual"] == 30000
-    assert by["customer_out_of_pocket_sek"]["status"] == "incorrect"
+    assert by["reimbursement_sek"]["status"] == "incorrect"
+    assert by["reimbursement_sek"]["extraction_method"] == "explicit_label"
+    assert by["reimbursement_sek"]["evidence"] == "Ersättning: 30 000 SEK"
     assert by["customer_out_of_pocket_sek"]["actual"] == 6000
-    assert res["correct_outputs"] == 0
-    assert res["total_outputs"] == 2
+    assert by["customer_out_of_pocket_sek"]["status"] == "incorrect"
+    assert res["ambiguous"] is False
     assert res["all_outputs_correct"] is False
 
 
-def test_calculation_correct_outputs_without_steps():
-    # Only final outputs stated, no step breakdown -> still correct.
+def test_q10_labeled_outputs_incorrect_not_ambiguous():
+    answer = "Ersättning: 5 525 SEK. Kundens självrisk: 2 475 SEK."
+    res = evaluate_calculation(_calc(_Q10_OUTPUTS), answer)
+    by = {c["field"]: c for c in res["calculation_checks"]}
+    assert by["reimbursement_sek"]["actual"] == 5525
+    assert by["reimbursement_sek"]["status"] == "incorrect"
+    assert by["customer_out_of_pocket_sek"]["actual"] == 2475
+    assert by["customer_out_of_pocket_sek"]["status"] == "incorrect"
+    assert res["ambiguous"] is False
+
+
+def test_correct_outputs_without_steps():
     answer = "Ersättningen blir 24 225 SEK och kunden betalar 5 775 SEK själv."
-    res = evaluate_calculation(_q8(), answer)
+    res = evaluate_calculation(_calc(_Q8_OUTPUTS), answer)
     assert res["all_outputs_correct"] is True
     assert res["correct_outputs"] == 2
 
 
-def test_calculation_missing_output_detected():
-    answer = "Operationen omfattas av försäkringen."  # no amounts at all
-    res = evaluate_calculation(_q8(), answer)
+def test_unrelated_amounts_do_not_disturb_labeled_output():
+    # Coverage limit + invoice cost present, but only one labeled reimbursement.
+    answer = (
+        "Det årliga taket är 120 000 SEK och fakturan var 30 000 SEK. "
+        "Ersättning: 24 225 SEK."
+    )
+    res = evaluate_calculation(_calc({"reimbursement_sek": 24225}), answer)
+    c = res["calculation_checks"][0]
+    assert c["status"] == "correct"
+    assert c["actual"] == 24225
+    assert res["ambiguous"] is False
+
+
+def test_intermediate_values_do_not_disturb_final_deductible():
+    # Fixed + variable deductible components appear, but the labeled final is one.
+    answer = (
+        "Fast självrisk 1 500 SEK dras, sedan 15 % rörlig självrisk 4 275 SEK. "
+        "Kundens självrisk: 5 775 SEK."
+    )
+    res = evaluate_calculation(_calc({"customer_out_of_pocket_sek": 5775}), answer)
+    c = res["calculation_checks"][0]
+    assert c["status"] == "correct"
+    assert c["actual"] == 5775
+    assert res["ambiguous"] is False
+
+
+def test_missing_final_output():
+    res = evaluate_calculation(_calc(_Q8_OUTPUTS), "Operationen omfattas av försäkringen.")
     assert all(c["status"] == "missing" for c in res["calculation_checks"])
     assert res["all_outputs_correct"] is False
 
 
-def test_calculation_ambiguous_triggers_review_and_not_ok():
-    # Two competing reimbursement values, neither the expected -> ambiguous.
+def test_contradictory_labeled_outputs_are_ambiguous():
+    answer = "Ersättning: 5 000 SEK. Efter omräkning: Ersättning: 6 000 SEK."
+    res = evaluate_calculation(_calc({"reimbursement_sek": 5500}), answer)
+    c = res["calculation_checks"][0]
+    assert c["status"] == "ambiguous"
+    assert c["actual"] == [5000, 6000]
+    assert res["ambiguous"] is True
+
+
+# ---- Layer-2 LLM extraction fallback (fake extractor, no API) -------------
+
+def test_llm_fallback_used_when_no_explicit_label():
+    # No parseable label -> extractor is consulted.
+    answer = "Kunden får trettio tusen kronor tillbaka."
+    def extractor(_answer):
+        return {"reimbursement_sek": 30000, "customer_out_of_pocket_sek": None,
+                "confidence": "high", "reason": "stated in words"}
+    res = evaluate_calculation(_calc({"reimbursement_sek": 24225}), answer, extractor=extractor)
+    c = res["calculation_checks"][0]
+    assert c["extraction_method"] == "llm_extraction"
+    assert c["actual"] == 30000
+    assert c["status"] == "incorrect"
+
+
+def test_ambiguous_calc_triggers_review():
     record = _calc_record(
-        {"reimbursement_sek": 24225},
-        key_facts=["Skadan ersätts"],
-        sources=_TWO_SOURCES,
+        {"reimbursement_sek": 5500}, key_facts=["Skadan ersätts"], sources=_TWO_SOURCES,
     )
     fake_llm = RunnableLambda(
-        lambda _pv: "Ersättningen blir 20 000 SEK eller möjligen 22 000 SEK."
+        lambda _pv: "Ersättning: 5 000 SEK. Ersättning: 6 000 SEK."
     )
-    docs = [
-        _doc(document_id="NP-CAT-TERMS-2026", section="3. Omfattningsnivåer"),
-        _doc(document_id="NP-CAT-TERMS-2026", section="5. Självrisker"),
-    ]
     res = evaluate_question(
-        record, _FakeRetriever(docs), config.get_settings(),
-        llm=fake_llm, fact_judge=_support_if("ers"),
+        record, _FakeRetriever([_doc(section="5. Självrisker")]),
+        config.get_settings(), llm=fake_llm, fact_judge=_support_if("ers"),
     )
     assert res["checks"]["calculation"]["ambiguous"] is True
     assert res["checks"]["answer_ok"] is False
     assert res["checks"]["needs_manual_review"] is True
+
+
+def test_low_confidence_llm_extraction_triggers_review():
+    record = _calc_record(
+        {"reimbursement_sek": 24225}, key_facts=["Skadan ersätts"], sources=_TWO_SOURCES,
+    )
+    fake_llm = RunnableLambda(lambda _pv: "Kunden får runt tjugofyra tusen tillbaka.")
+
+    def low_conf_extractor(_answer):
+        return {"reimbursement_sek": 24225, "customer_out_of_pocket_sek": None,
+                "confidence": "low", "reason": "unsure"}
+
+    res = evaluate_question(
+        record, _FakeRetriever([_doc(section="5. Självrisker")]),
+        config.get_settings(), llm=fake_llm,
+        fact_judge=_support_if("tillbaka"), output_extractor=low_conf_extractor,
+    )
+    assert res["checks"]["answer"]["all_facts_supported"] is True
+    assert res["checks"]["needs_manual_review"] is True
+
+
+def test_high_conf_unsupported_fact_suppresses_low_conf_review():
+    # A high-confidence UNsupported fact -> confident failure, so a co-occurring
+    # low-confidence signal must NOT force manual review.
+    record = _calc_record(
+        {"reimbursement_sek": 24225},
+        key_facts=["Skadan ersätts inte alls"],  # judged unsupported, high conf
+        sources=_TWO_SOURCES,
+    )
+    fake_llm = RunnableLambda(lambda _pv: "Kunden får runt tjugofyra tusen.")
+
+    def unsupported_high(fact, answer):
+        return {"supported": False, "confidence": "high", "reason": "not stated"}
+
+    def low_conf_extractor(_answer):
+        return {"reimbursement_sek": 24225, "customer_out_of_pocket_sek": None,
+                "confidence": "low", "reason": "unsure"}
+
+    res = evaluate_question(
+        record, _FakeRetriever([_doc(section="5. Självrisker")]),
+        config.get_settings(), llm=fake_llm,
+        fact_judge=unsupported_high, output_extractor=low_conf_extractor,
+    )
+    assert res["checks"]["answer_ok"] is False          # unsupported fact fails it
+    assert res["checks"]["needs_manual_review"] is False  # but confidently, no review
 
 
 def test_abstention_bypasses_fact_judging():

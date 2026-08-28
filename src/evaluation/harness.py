@@ -38,6 +38,10 @@ DEFAULT_RESULTS_PATH = RESULTS_DIR / "latest.json"
 # A fact judge is any callable (fact, answer) -> {"supported", "confidence", "reason"}.
 FactJudge = Callable[[str, str], Dict[str, Any]]
 
+# A calc-output extractor is any callable (answer) -> {"reimbursement_sek", ...,
+# "confidence", "reason"} reporting only the FINAL amounts the answer claims.
+CalcExtractor = Callable[[str], Dict[str, Any]]
+
 # Keys guaranteed to be present on every per-question result record.
 RESULT_KEYS = {
     "id",
@@ -239,6 +243,72 @@ class SemanticFactJudge:
         }
 
 
+_EXTRACTOR_SYSTEM = (
+    "You extract the FINAL monetary amounts that a Swedish pet-insurance answer "
+    "claims. Report the reimbursement the customer receives (ersättning) and the "
+    "customer's total out-of-pocket cost / self-risk (kundens självrisk / vad "
+    "kunden betalar), each as an integer number of SEK, or null if the answer "
+    "does not state it. Report ONLY what the answer claims — do NOT compute, "
+    "correct or judge anything, and you are given no correct values. Ignore "
+    "intermediate amounts such as invoice cost, coverage limits and the "
+    "fixed/variable deductible components; report the final totals only. Give a "
+    "confidence of high, medium or low and a short reason."
+)
+
+
+class CalculationOutputExtractor:
+    """LLM fallback that reports the final amounts an answer claims.
+
+    Sees only the answer; never the golden values. Reuses the judge model.
+    """
+
+    def __init__(self, settings: Optional[Settings] = None, model: Optional[str] = None):
+        self.settings = settings or get_settings()
+        self.model = model or self.settings.judge_model
+        self._chain = None
+
+    def _get_chain(self):
+        if self._chain is None:
+            from typing import Optional as Opt
+
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_openai import ChatOpenAI
+            from pydantic import BaseModel, Field
+
+            class OutputClaims(BaseModel):
+                reimbursement_sek: Opt[int] = Field(
+                    None, description="Final reimbursement amount claimed (SEK), or null"
+                )
+                customer_out_of_pocket_sek: Opt[int] = Field(
+                    None, description="Final customer out-of-pocket/self-risk (SEK), or null"
+                )
+                confidence: str = Field(description="high, medium or low")
+                reason: str = Field(description="Short justification")
+
+            llm = ChatOpenAI(
+                model=self.model,
+                temperature=0,
+                api_key=self.settings.require_api_key(),
+            )
+            prompt = ChatPromptTemplate.from_messages(
+                [("system", _EXTRACTOR_SYSTEM), ("human", "{answer}")]
+            )
+            self._chain = prompt | llm.with_structured_output(OutputClaims)
+        return self._chain
+
+    def __call__(self, answer: str) -> Dict[str, Any]:
+        claims = self._get_chain().invoke({"answer": answer})
+        conf = str(claims.confidence).lower()
+        if conf not in ("high", "medium", "low"):
+            conf = "low"
+        return {
+            "reimbursement_sek": claims.reimbursement_sek,
+            "customer_out_of_pocket_sek": claims.customer_out_of_pocket_sek,
+            "confidence": conf,
+            "reason": claims.reason,
+        }
+
+
 def evaluate_facts(
     record: Dict[str, Any],
     answer: str,
@@ -309,87 +379,128 @@ def evaluate_facts(
 # Answer quality: calculation-output evaluation
 # --------------------------------------------------------------------------
 
-# Swedish anchor terms that identify which amount in an answer belongs to which
-# expected output field. Chosen to avoid false hits (e.g. we anchor
-# out-of-pocket on "betalar", NOT "självrisk", so the fixed deductible line does
-# not get mistaken for the customer's total cost).
-OUTPUT_ANCHORS = {
-    "reimbursement_sek": ("ersätt", "återbetal"),
-    "customer_out_of_pocket_sek": ("betalar", "egen ficka", "out-of-pocket"),
+# Swedish label patterns for explicitly stated FINAL outputs. The amount is the
+# named group ``val``. Matched with highest priority so clearly labeled outputs
+# are never made ambiguous by intermediate arithmetic, invoice cost or coverage
+# limits. A label needs an explicit connector (":"/"är"/"blir"/…), so a bare
+# "fast självrisk 1 500 SEK" line is NOT treated as a final output.
+_V = r"(?P<val>\d[\d ]*\d|\d)\s*(?:sek|kr)"
+_OUTPUT_PATTERNS = {
+    "reimbursement_sek": [
+        r"ersättning(?:en|sbelopp)?(?:\s+som\s+kunden\s+får)?\s*(?::|är|blir|uppgår till|landar på)\s*" + _V,
+        _V + r"\s+i\s+ersättning",
+    ],
+    "customer_out_of_pocket_sek": [
+        r"(?:kundens?\s+)?(?:total\s+)?självrisk(?:en)?\s*(?::|är|blir|uppgår till)\s*" + _V,
+        r"kundens?\s+egen\s+kostnad\s*(?::|är|blir)?\s*" + _V,
+        r"totalt\s+blir\s+kundens\s+självrisk\s*" + _V,
+        r"kunden\s+betalar\s+" + _V,
+    ],
 }
 
 
-def _amounts_in(clause: str) -> List[int]:
-    """SEK amounts found in a single clause."""
-    return [
-        int(m.group(1).replace(" ", ""))
-        for m in re.finditer(r"(\d[\d ]*\d|\d)\s*(sek|kr)\b", clause)
-    ]
+def _explicit_output_matches(
+    field: str, text_l: str, orig: str, summary_idx: Optional[int]
+) -> List[Tuple[int, str]]:
+    """Return [(value, evidence), ...] for explicitly labeled outputs of a field.
 
-
-def _clauses(answer: str) -> List[str]:
-    """Lowercase the answer and split into clauses.
-
-    Clause boundaries are strong punctuation and the conjunction 'och', so an
-    amount is associated only with an anchor in the SAME clause (e.g.
-    'ersättningen blir X' vs 'kunden betalar Y').
+    If a 'Sammanfattning' section exists and holds labeled outputs, only those
+    are used (a final summary beats intermediate mentions).
     """
-    t = answer.replace(_NBSP, " ").replace(_THIN, " ").lower()
-    return [c for c in re.split(r"[.;,\n]| och ", t) if c.strip()]
+    found = []  # (value, evidence, start)
+    for pat in _OUTPUT_PATTERNS.get(field, ()):
+        for m in re.finditer(pat, text_l):
+            value = int(m.group("val").replace(" ", ""))
+            found.append((value, orig[m.start():m.end()].strip(), m.start()))
+
+    if summary_idx is not None:
+        in_summary = [f for f in found if f[2] >= summary_idx]
+        if in_summary:
+            found = in_summary
+
+    seen, out = set(), []
+    for value, evidence, _ in found:
+        if (value, evidence) not in seen:
+            seen.add((value, evidence))
+            out.append((value, evidence))
+    return out
 
 
-def _extract_output(field: str, expected: int, clauses: List[str]) -> Tuple[Any, str]:
-    """Classify the answer's value for one output field.
-
-    status is one of: 'correct', 'incorrect', 'missing', 'ambiguous'.
-    """
-    all_vals = [v for c in clauses for v in _amounts_in(c)]
-    if not all_vals:
-        return None, "missing"
-
-    anchors = OUTPUT_ANCHORS.get(field, ())
-    associated = [
-        v
-        for c in clauses
-        if anchors and any(a in c for a in anchors)
-        for v in _amounts_in(c)
-    ]
-
-    if associated:
-        distinct = set(associated)
-        if expected in distinct:
-            return expected, "correct"
-        if len(distinct) == 1:
-            return associated[0], "incorrect"
-        return sorted(distinct), "ambiguous"
-
-    # No clause pins this field: accept an exact match anywhere, else missing.
-    if expected in set(all_vals):
-        return expected, "correct"
-    return None, "missing"
+def _classify_output(field, expected, value, method, evidence, confidence, status=None):
+    return {
+        "field": field,
+        "expected": expected,
+        "actual": value,
+        "status": status or ("correct" if value == expected else "incorrect"),
+        "extraction_method": method,
+        "evidence": evidence,
+        "confidence": confidence,
+    }
 
 
 def evaluate_calculation(
-    record: Dict[str, Any], answer: str
+    record: Dict[str, Any],
+    answer: str,
+    extractor: Optional[CalcExtractor] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Evaluate required final calculation OUTPUTS against the answer.
+    """Layered extraction of FINAL calculation outputs, compared to golden.
 
-    Only compares final outputs (not reference steps). Returns None when the
-    record has no structured ``calculation.expected_outputs``.
+    Layer 1 (deterministic): explicit Swedish output labels.
+    Layer 2 (fallback): a semantic LLM extractor that only reports which final
+    amounts the answer claims (never sees golden, never judges correctness).
+    Only final outputs are compared — reference steps are ignored.
+
+    status per field: 'correct' | 'incorrect' | 'missing' | 'ambiguous'.
     """
     calc = record.get("calculation") or {}
     expected_outputs = calc.get("expected_outputs")
     if not expected_outputs:
         return None
 
-    clauses = _clauses(answer)
-    checks = []
-    for field, expected in expected_outputs.items():
-        actual, status = _extract_output(field, expected, clauses)
-        checks.append(
-            {"field": field, "expected": expected, "actual": actual, "status": status}
-        )
+    orig = answer.replace(_NBSP, " ").replace(_THIN, " ")
+    text_l = orig.lower()
+    m = re.search(r"sammanfattning", text_l)
+    summary_idx = m.start() if m else None
 
+    resolved: Dict[str, Dict[str, Any]] = {}
+    unresolved: List[str] = []
+    for field, expected in expected_outputs.items():
+        matches = _explicit_output_matches(field, text_l, orig, summary_idx)
+        if not matches:
+            unresolved.append(field)
+            continue
+        distinct = sorted({v for v, _ in matches})
+        if len(distinct) == 1:
+            resolved[field] = _classify_output(
+                field, expected, distinct[0], "explicit_label", matches[0][1], "high"
+            )
+        else:
+            resolved[field] = _classify_output(
+                field, expected, distinct, "explicit_label",
+                [e for _, e in matches], "high", status="ambiguous",
+            )
+
+    # Layer 2: semantic fallback only for fields Layer 1 could not resolve.
+    llm_result = extractor(answer) if (unresolved and extractor is not None) else None
+    for field in unresolved:
+        expected = expected_outputs[field]
+        claimed = llm_result.get(field) if llm_result else None
+        if claimed is not None:
+            resolved[field] = _classify_output(
+                field, expected, claimed, "llm_extraction",
+                (llm_result or {}).get("reason", ""),
+                (llm_result or {}).get("confidence", "low"),
+            )
+        else:
+            resolved[field] = _classify_output(
+                field, expected, None,
+                "llm_extraction" if llm_result is not None else "none",
+                (llm_result or {}).get("reason") if llm_result else None,
+                (llm_result or {}).get("confidence", "low") if llm_result else "n/a",
+                status="missing",
+            )
+
+    checks = [resolved[f] for f in expected_outputs]
     correct = sum(1 for c in checks if c["status"] == "correct")
     total = len(checks)
     return {
@@ -398,6 +509,10 @@ def evaluate_calculation(
         "total_outputs": total,
         "all_outputs_correct": total > 0 and correct == total,
         "ambiguous": any(c["status"] == "ambiguous" for c in checks),
+        "low_confidence": any(
+            c["extraction_method"] == "llm_extraction" and c["confidence"] == "low"
+            for c in checks
+        ),
     }
 
 
@@ -411,6 +526,7 @@ def evaluate_question(
     settings: Settings,
     llm: Any = None,
     fact_judge: Optional[FactJudge] = None,
+    output_extractor: Optional[CalcExtractor] = None,
 ) -> Dict[str, Any]:
     """Evaluate a single golden question. Only ``question`` is fed downstream."""
     question = record["question"]
@@ -431,7 +547,9 @@ def evaluate_question(
 
     # Answer quality: key facts + calculation outputs, evaluated independently.
     answer_quality = evaluate_facts(record, result.answer, judge=fact_judge)
-    calculation = evaluate_calculation(record, result.answer)
+    calculation = evaluate_calculation(
+        record, result.answer, extractor=output_extractor
+    )
 
     facts_ok = bool(answer_quality and answer_quality["all_facts_supported"])
     calc_ok = calculation is None or calculation["all_outputs_correct"]
@@ -448,18 +566,24 @@ def evaluate_question(
         answer_ok = behavior_matches
 
     # Manual review ONLY when the evaluator cannot confidently decide:
-    # low-confidence semantic judgment or ambiguous numeric extraction.
+    # ambiguous numeric extraction, or a low-confidence judgment/extraction.
     # Wrong calculations, missing facts and incomplete retrieval are confident
-    # automatic failures, NOT review cases.
-    low_confidence = bool(
-        answer_quality
-        and any(
-            c["method"] == "semantic_judge" and c["confidence"] == "low"
-            for c in answer_quality["fact_checks"]
-        )
+    # automatic failures, NOT review cases. Also, a high-confidence UNsupported
+    # fact means we are already confident the answer is wrong, so low-confidence
+    # signals elsewhere should not force a review.
+    fact_checks = answer_quality["fact_checks"] if answer_quality else []
+    low_conf_fact = any(
+        c["method"] == "semantic_judge" and c["confidence"] == "low"
+        for c in fact_checks
+    )
+    high_conf_unsupported = any(
+        c["method"] == "semantic_judge" and not c["supported"] and c["confidence"] == "high"
+        for c in fact_checks
     )
     ambiguous_calc = bool(calculation and calculation["ambiguous"])
-    needs_manual_review = low_confidence or ambiguous_calc
+    low_conf_calc = bool(calculation and calculation["low_confidence"])
+    low_confidence = (low_conf_fact or low_conf_calc) and not high_conf_unsupported
+    needs_manual_review = ambiguous_calc or low_confidence
 
     return {
         "id": record["id"],
@@ -537,6 +661,7 @@ def run_evaluation(
     retriever: Any = None,
     llm: Any = None,
     fact_judge: Optional[FactJudge] = None,
+    output_extractor: Optional[CalcExtractor] = None,
     golden_path: Path = GOLDEN_PATH,
 ) -> Dict[str, Any]:
     """Run the full evaluation and return a machine-readable payload."""
@@ -544,10 +669,15 @@ def run_evaluation(
     retriever = retriever or InsuranceRetriever(settings=settings)
     if fact_judge is None:
         fact_judge = SemanticFactJudge(settings=settings)
+    if output_extractor is None:
+        output_extractor = CalculationOutputExtractor(settings=settings)
     records = load_golden(golden_path)
 
     results = [
-        evaluate_question(r, retriever, settings, llm=llm, fact_judge=fact_judge)
+        evaluate_question(
+            r, retriever, settings, llm=llm,
+            fact_judge=fact_judge, output_extractor=output_extractor,
+        )
         for r in records
     ]
 
