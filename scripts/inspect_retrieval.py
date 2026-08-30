@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.stdout.reconfigure(encoding="utf-8")
 
-import config  # noqa: E402
-from retrieval.retriever import InsuranceRetriever  # noqa: E402
+import config
+from retrieval.retriever import InsuranceRetriever
 
 GOLDEN = ROOT / "eval" / "golden_qa.jsonl"
 TARGET_QIDS = ["Q6", "Q7", "Q8", "Q10"]

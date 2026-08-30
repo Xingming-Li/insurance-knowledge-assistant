@@ -108,7 +108,8 @@ insurance-knowledge-assistant/
 │   ├── run_eval.py
 │   └── results/
 ├── scripts/
-│   └── inspect_retrieval.py
+│   ├── inspect_retrieval.py
+│   └── compare_retrieval.py
 ├── tests/
 ├── .env.example
 └── requirements.txt
@@ -144,6 +145,18 @@ Run the evaluation harness:
 
 ``` bash
 PYTHONPATH=src python eval/run_eval.py
+```
+
+Inspect retrieval for selected questions:
+
+``` bash
+PYTHONPATH=src python scripts/inspect_retrieval.py
+```
+
+Compare baseline dense vs decomposed retrieval:
+
+``` bash
+PYTHONPATH=src python scripts/compare_retrieval.py
 ```
 
 > On Windows PowerShell, set `PYTHONPATH` separately before running the
