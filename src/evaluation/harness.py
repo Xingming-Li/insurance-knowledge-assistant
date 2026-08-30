@@ -577,7 +577,7 @@ def evaluate_question(
         for c in fact_checks
     )
     high_conf_unsupported = any(
-        c["method"] == "semantic_judge" and not c["supported"] and c["confidence"] == "high"
+        not c["supported"] and c["confidence"] == "high"
         for c in fact_checks
     )
     ambiguous_calc = bool(calculation and calculation["ambiguous"])
