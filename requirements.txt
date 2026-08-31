@@ -28,6 +28,9 @@ openai>=1.40,<2
 tiktoken>=0.7,<1
 posthog>=2.4.0,<6.0.0
 
+# --- Demo UI ---
+streamlit>=1.36,<2
+
 # --- Testing ---
 pytest>=8,<10
 

@@ -10,9 +10,11 @@ class FakeVectorStore:
     def __init__(self, docs):
         self._docs = docs
         self.last_k = None
+        self.last_filter = "unset"
 
-    def similarity_search(self, question, k):
+    def similarity_search(self, question, k, filter=None):
         self.last_k = k
+        self.last_filter = filter
         return self._docs[:k]
 
 

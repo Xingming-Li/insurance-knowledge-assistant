@@ -46,7 +46,7 @@ def main() -> None:
     records = load_answerable()
 
     baseline = InsuranceRetriever(settings=settings)
-    decomposed = DecomposedRetriever(settings=settings, k_sub=3, max_chunks=BUDGET)
+    decomposed = DecomposedRetriever(settings=settings, max_chunks=BUDGET)
 
     strat = {
         "baseline (top-%d)" % BUDGET: {"pairs": 0, "complete": 0, "chunks": 0, "nonmatch": 0, "per_q": []},

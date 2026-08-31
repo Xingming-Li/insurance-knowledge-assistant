@@ -89,6 +89,6 @@ def get_settings() -> Settings:
         collection_name=os.getenv("CHROMA_COLLECTION", "insurance_docs"),
         chunk_size=_int_env("CHUNK_SIZE", 1000),
         chunk_overlap=_int_env("CHUNK_OVERLAP", 120),  # ~12% overlap
-        retrieval_k=_int_env("RETRIEVAL_K", 4),
+        retrieval_k=_int_env("RETRIEVAL_K", 8),
         docs_path=os.getenv("DOCS_PATH", str(DEFAULT_DOCS)),
     )

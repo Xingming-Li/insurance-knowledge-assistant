@@ -14,6 +14,7 @@ any API calls.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Dict, List, Optional
 
 from config import Settings, get_settings
@@ -73,15 +74,41 @@ def doc_passes_filter(document_id: str, flt: Optional[Dict[str, Any]]) -> bool:
 
 _DECOMPOSER_SYSTEM = (
     "You turn a compound Swedish pet-insurance question into a SMALL set of "
-    "retrieval subqueries (search queries, NOT answers). Identify the species "
-    "('dog' for hund, 'cat' for katt, else null). For each distinct evidence "
-    "need, produce one short Swedish subquery of keywords. Set scope to "
-    "'species_terms' when the need is a species-specific policy fact from the "
-    "product terms (reimbursement limits/ersättningstak, deductibles/självrisk, "
-    "coverage tiers/nivåer, waiting periods/karens), and 'general' otherwise "
-    "(veterinary care, surgery, pre-authorisation, claims, exclusions, customer "
-    "service). Do NOT over-split: a simple single-intent question must yield "
-    "exactly ONE subquery. Never produce more than four subqueries."
+    "retrieval subqueries (search queries for a vector search over policy "
+    "documents, NOT answers). Identify the species ('dog' for hund, 'cat' for "
+    "katt, else null).\n"
+    "\n"
+    "STRICT RULES — never invent policy facts:\n"
+    "- Produce retrieval queries only, never answers, values or conclusions.\n"
+    "- You may reuse numbers that appear explicitly in the user's question, but "
+    "NEVER introduce a number that is not in the question — no waiting periods, "
+    "no deductible periods, no deductible amounts or percentages, no coverage or "
+    "reimbursement limits, no age limits, no figures of any kind.\n"
+    "- Use general policy vocabulary (karens, självrisk, ersättningstak, nivå, "
+    "förhandsgodkännande, undantag, kirurgi ...), not invented specific values.\n"
+    "\n"
+    "SCOPE per subquery:\n"
+    "- 'species_terms' for species-specific product-terms facts: reimbursement "
+    "limits/ersättningstak, deductibles/självrisk, coverage tiers/nivåer, "
+    "waiting periods/karens.\n"
+    "- 'general' for shared documents: veterinary care/treatment, surgery, "
+    "pre-authorisation, claims, exclusions, customer service.\n"
+    "\n"
+    "EVIDENCE DIMENSIONS — add a subquery ONLY when the question reasonably needs "
+    "it; do NOT mechanically emit all of them:\n"
+    "- coverage/eligibility; insurance level & limits; exclusions/restrictions; "
+    "waiting periods/qualifying conditions; deductibles & calculation mechanics; "
+    "veterinary-treatment requirements; pre-authorisation; claims procedures.\n"
+    "- Surgery/operation/treatment questions: consider a general "
+    "veterinary-guideline subquery (kirurgi/behandling).\n"
+    "- Coverage questions: consider BOTH positive coverage AND "
+    "exclusions/restrictions.\n"
+    "- Calculation questions: retrieve BOTH the applicable values (nivå, "
+    "självrisk, ersättningstak) AND the calculation mechanics (hur självrisken "
+    "beräknas).\n"
+    "\n"
+    "Do NOT over-split: a simple single-intent question must yield exactly ONE "
+    "subquery. Never produce more than four subqueries."
 )
 
 
@@ -133,21 +160,24 @@ class QueryDecomposer:
 # --------------------------------------------------------------------------
 
 class DecomposedRetriever:
-    """Compound-question retriever: decompose -> filtered subquery search -> merge."""
+    """Compound-question retriever: decompose -> filtered subquery search -> merge.
+
+    EXPERIMENTAL — NOT the v1 default. The application (app.py) and the
+    evaluation harness use ``InsuranceRetriever`` (the dense baseline). This
+    class is kept for comparison/research only.
+    """
 
     def __init__(
         self,
         settings: Optional[Settings] = None,
         vector_store: Any = None,
         decomposer: Optional[Decomposer] = None,
-        k_sub: int = 3,
         max_chunks: int = 8,
         max_subqueries: int = 4,
     ):
         self.settings = settings or get_settings()
         self._vector_store = vector_store
         self._decomposer = decomposer
-        self.k_sub = k_sub
         self.max_chunks = max_chunks
         self.max_subqueries = max_subqueries
 
@@ -183,12 +213,18 @@ class DecomposedRetriever:
             subqueries = [{"query": question, "scope": "general"}]
         subqueries = subqueries[: self.max_subqueries]
 
+        # Budget per subquery so a small number of subqueries does not shrink the
+        # total evidence below a single-query baseline. The final set is still
+        # bounded by max_chunks after merging.
+        n_subqueries = max(1, len(subqueries))
+        k_sub = max(4, math.ceil(self.max_chunks / n_subqueries))
+
         vs = self._get_vector_store()
         hits = []  # dicts with doc + provenance
         for idx, sq in enumerate(subqueries):
             flt = build_filter(species, sq.get("scope", "general"))
             results = vs.similarity_search_with_relevance_scores(
-                sq["query"], k=self.k_sub, filter=flt
+                sq["query"], k=k_sub, filter=flt
             )
             for doc, score in results:
                 m = doc.metadata or {}
@@ -210,6 +246,7 @@ class DecomposedRetriever:
         return {
             "decomposition": decomposition,
             "subqueries": subqueries,
+            "k_sub": k_sub,
             "hits": hits,
             "final": merged,
         }

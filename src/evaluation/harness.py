@@ -531,7 +531,7 @@ def evaluate_question(
     """Evaluate a single golden question. Only ``question`` is fed downstream."""
     question = record["question"]
 
-    docs = retriever.retrieve(question, k=settings.retrieval_k)
+    docs = retriever.retrieve_for_answer(question, k=settings.retrieval_k)
     result = generate_answer(question, docs, settings=settings, llm=llm)
 
     retrieved_documents = [(d.metadata or {}).get("document_id") for d in docs]

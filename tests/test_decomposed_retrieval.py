@@ -1,3 +1,8 @@
+import os
+import re
+
+import pytest
+
 import config
 from langchain_core.documents import Document
 
@@ -5,6 +10,7 @@ from retrieval.decomposed import (
     CAT_TERMS,
     DOG_TERMS,
     DecomposedRetriever,
+    QueryDecomposer,
     build_filter,
     doc_passes_filter,
 )
@@ -127,14 +133,66 @@ def test_subqueries_are_capped():
 def test_final_set_is_bounded():
     docs = [_doc("NP-VET-2026", f"{i}. Sec{i}") for i in range(20)]
     vs = FakeVS(docs)
+    # 1 subquery -> k_sub = max(4, ceil(3/1)) = 4 distinct docs, capped to 3.
     r = DecomposedRetriever(
         settings=config.get_settings(), vector_store=vs,
-        decomposer=_decomp(None, [
-            {"query": "a", "scope": "general"},
-            {"query": "b", "scope": "general"},
-            {"query": "c", "scope": "general"},
-        ]),
-        k_sub=3, max_chunks=6,
+        decomposer=_decomp(None, [{"query": "a", "scope": "general"}]),
+        max_chunks=3,
     )
     final = r.retrieve_detailed("q")["final"]
-    assert len(final) <= 6
+    assert len(final) == 3
+
+
+# ---- k_sub budgeting: k_sub = max(4, ceil(max_chunks / n_subqueries)) ------
+
+def _k_used(n_subqueries, max_chunks):
+    docs = [_doc("NP-VET-2026", f"{i}. S{i}") for i in range(20)]
+    vs = FakeVS(docs)
+    subs = [{"query": f"q{i}", "scope": "general"} for i in range(n_subqueries)]
+    r = DecomposedRetriever(
+        settings=config.get_settings(), vector_store=vs,
+        decomposer=_decomp(None, subs), max_chunks=max_chunks,
+    )
+    detailed = r.retrieve_detailed("q")
+    ks = {c["k"] for c in vs.calls}
+    assert len(ks) == 1  # same k for every subquery
+    assert detailed["k_sub"] == next(iter(ks))
+    return detailed["k_sub"]
+
+
+def test_one_subquery_uses_full_budget():
+    assert _k_used(1, 8) == 8
+
+
+def test_two_subqueries_split_budget():
+    assert _k_used(2, 8) == 4
+
+
+def test_three_and_four_subqueries_floor_at_four():
+    assert _k_used(3, 8) == 4   # ceil(8/3)=3 -> floored to 4
+    assert _k_used(4, 8) == 4   # ceil(8/4)=2 -> floored to 4
+
+
+def test_final_capped_at_max_chunks_with_many_subqueries():
+    docs = [_doc("NP-VET-2026", f"{i}. S{i}") for i in range(40)]
+    vs = FakeVS(docs)
+    subs = [{"query": f"q{i}", "scope": "general"} for i in range(4)]
+    r = DecomposedRetriever(
+        settings=config.get_settings(), vector_store=vs,
+        decomposer=_decomp(None, subs), max_chunks=8,
+    )
+    assert len(r.retrieve_detailed("q")["final"]) <= 8
+
+
+# ---- Anti-invention: decomposer must not introduce new numeric facts -------
+
+@pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="requires OpenAI API")
+def test_decomposer_does_not_invent_numbers():
+    # A question with NO digits: any digit in a subquery would be invented.
+    question = "Täcks en operation för en hund och hur beräknas självrisken?"
+    assert not re.search(r"\d", question)
+    result = QueryDecomposer(settings=config.get_settings())(question)
+    invented = [
+        sq["query"] for sq in result["subqueries"] if re.search(r"\d", sq["query"])
+    ]
+    assert invented == [], f"decomposer introduced numbers: {invented}"
