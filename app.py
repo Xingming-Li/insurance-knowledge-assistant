@@ -19,9 +19,19 @@ import streamlit as st
 from config import get_settings
 from generation.answer import generate_answer
 from retrieval.retriever import InsuranceRetriever
-from ui_format import format_source, is_abstention
+from ui_format import is_abstention
 
 TITLE = "Pawli — NordicPaws AI-assistent"
+
+# Clickable example/FAQ questions (Swedish). A spread of dog/cat, lookup and
+# calculation, so the demo shows the assistant's range.
+EXAMPLE_QUESTIONS = [
+    "Hur lång är karenstiden för sjukdom för en hund?",
+    "Vilka handlingar behöver kunden skicka in vid en skadeanmälan?",
+    "Vad är det årliga ersättningstaket för kattförsäkring på nivå Premium?",
+    "Täcks akut veterinärvård utanför ordinarie öppettider?",
+    "En hund på nivå Premium ska genomgå en planerad operation som beräknas kosta 30 000 SEK. Krävs förhandsgodkännande, hur mycket ersätts och vad blir kundens självrisk?"
+]
 
 
 @st.cache_resource(show_spinner=False)
@@ -46,7 +56,16 @@ def main() -> None:
         )
         return
 
-    question = st.chat_input("Ställ en fråga om hund- eller kattförsäkring …")
+    st.markdown("**Exempelfrågor** — klicka för att prova:")
+    clicked = None
+    for i, example in enumerate(EXAMPLE_QUESTIONS):
+        if st.button(example, key=f"example_{i}", use_container_width=True):
+            clicked = example
+
+    typed = st.chat_input("Ställ en fråga om hund- eller kattförsäkring …")
+
+    # Either a typed question or a clicked example drives the same answer flow.
+    question = typed or clicked
     if not question:
         return
 
@@ -60,11 +79,9 @@ def main() -> None:
         if is_abstention(result.answer, result.used_evidence):
             st.warning(result.answer)
         else:
+            # The answer already carries inline [Källa N] and ends with its own
+            # "Källor:" list of the sources actually used — render it as-is.
             st.markdown(result.answer)
-            if result.citations:
-                st.markdown("**Källor**")
-                for c in result.citations:
-                    st.markdown(f"- {format_source(c)}")
 
         if docs:
             with st.expander("Visa hämtat underlag"):

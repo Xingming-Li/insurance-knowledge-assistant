@@ -40,32 +40,3 @@ def format_source(citation: Any) -> str:
     if version:
         parts.append(f"v{version}")
     return " · ".join(parts) if parts else "Okänd källa"
-
-
-def strip_generated_source_footer(answer: str) -> str:
-    """Remove a trailing LLM-generated source list/footer.
-
-    Keeps inline citations such as "(Källa 1)" intact.
-    """
-    if not answer:
-        return answer
-
-    patterns = [
-        # Källor: [Källa 1], [Källa 8], [Källa 9].
-        r"\n+\s*Källor\s*:\s*(?:\[?Källa\s+\d+\]?\s*[,;.]?\s*)+\s*$",
-
-        # Markdown heading followed by a source list at the end.
-        r"\n+\s*\*{0,2}Källor\*{0,2}\s*:?\s*\n(?:\s*[-*]\s+.*\n?)+\s*$",
-    ]
-
-    cleaned = answer.rstrip()
-
-    for pattern in patterns:
-        cleaned = re.sub(
-            pattern,
-            "",
-            cleaned,
-            flags=re.IGNORECASE | re.MULTILINE,
-        ).rstrip()
-
-    return cleaned
