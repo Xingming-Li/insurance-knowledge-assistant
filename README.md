@@ -1,12 +1,12 @@
-# NordicPaws Försäkring --- Insurance Knowledge Assistant
+# NordicPaws Försäkring --- Insurance Knowledge Assistant (Pawli v1)
 
-A Swedish-language RAG demo for **pet-insurance employees**, built with
-**LangChain, OpenAI embeddings, Chroma, Streamlit, and Python**.
+A Swedish-language RAG demo for **pet-insurance teams**, built with
+**LangChain, OpenAI, Chroma, Streamlit, and Python**.
 
 The v1 concept is an **internal insurance knowledge copilot**: it helps
 customer-service and insurance staff find, interpret, and explain policy
 information with traceable source evidence. A future customer-facing
-assistant could reuse the same knowledge layer with stricter guardrails
+assistant could reuse the same knowledge layer with different guardrails
 and escalation workflows.
 
 > ⚠️ **Demo only:** NordicPaws Försäkring is fictional. The documents
@@ -26,11 +26,7 @@ The assistant answers Swedish-language questions about:
 -   Policy-based deductible calculations
 
 It provides grounded answers with source references and can expose the
-retrieved evidence for employee verification.
-
-It also **abstains when the available documents do not contain
-sufficient evidence**, for example for questions about premium prices or
-foreign/travel coverage.
+retrieved evidence for employee verification. It also **abstains when the available documents do not contain sufficient evidence**, for example for questions about premium prices or foreign/travel coverage.
 
 ## Intended user
 
@@ -85,7 +81,7 @@ knowledge-retrieval prototype, not an autonomous claims-decision system.
 
 ## Retrieval and generation strategy
 
-The v1 system intentionally uses a relatively simple retrieval
+The v1 system deliberately uses a relatively simple retrieval
 architecture rather than adding multiple LLM-based routing or reranking
 stages.
 
@@ -108,17 +104,12 @@ simpler baseline under the evaluation setup.
 
 ## Evaluation
 
-The evaluation harness deliberately separates **retrieval quality**,
-**answer quality**, **behavior**, and **calculation correctness**.
-
-Retrieval is evaluated using expected `(document_id, section)` source
-pairs. Answer quality is evaluated using expected behavior and atomic
-key facts. Numeric questions additionally use structured
+The evaluation harness separates **retrieval quality**, **answer quality**, **behavior**, and **calculation correctness**. Retrieval is evaluated using expected `(document_id, section)` source pairs. Answer quality is evaluated using expected behavior and atomic key facts. Numeric questions additionally use structured
 calculation-output checks.
 
-### Final v1 evaluation run
+### Recorded v1 evaluation run
 
-Model configuration:
+The results below are from one recorded evaluation run. Although the generation and judge models use temperature=0.0, LLM outputs are not guaranteed to be deterministic, so individual answer-quality and semantic-evaluation results may vary between runs. Retrieval results are more stable where the index and configuration remain unchanged.
 
 ``` text
 Chat model:       gpt-4o-mini
@@ -128,23 +119,23 @@ Retrieval k:      8
 Golden questions: 12
 ```
 
+```
   Metric                                            Result
   ------------------------------------ -------------------
-  Behavior match                          **12/12 (100%)**
-  Answerable questions answered           **10/10 (100%)**
-  Correct abstentions                       **2/2 (100%)**
-  Complete expected source retrieval        **8/10 (80%)**
-  Expected source-pair recall              **17/20 (85%)**
-  Answer correctness (`answer_ok`)          **8/10 (80%)**
-  All expected key facts supported          **8/10 (80%)**
-  Key-fact recall                        **22/26 (84.6%)**
-  Calculation correctness                   **3/3 (100%)**
+  Behavior match                              12/12 (100%)
+  Answerable questions answered               10/10 (100%)
+  Correct abstentions                           2/2 (100%)
+  Complete expected source retrieval            8/10 (80%)
+  Expected source-pair recall                  17/20 (85%)
+  Answer correctness                            8/10 (80%)
+  All expected key facts supported              8/10 (80%)
+  Key-fact recall                            22/26 (84.6%)
+  Calculation correctness                       3/3 (100%)
+```
 
-The remaining answer failures are complex multi-part questions where
-dense retrieval does not consistently surface every policy section
-needed to establish all expected facts.
+The remaining answer failures are within some complex multi-part questions (e.g., **Q6** and **Q7** in `eval/golden_qa.jsonl`) where dense retrieval does not consistently surface every policy section needed to establish all expected facts.
 
-These figures come from a **small synthetic development benchmark**.
+Notably, these figures come from a **small synthetic development benchmark**.
 They are useful for regression testing and engineering diagnostics, but
 they should not be interpreted as estimates of production accuracy on
 real insurance questions.
@@ -168,49 +159,38 @@ Synthetic Swedish insurance documents
                 ↓
         ┌───────┴────────┐
         │                │
- ordinary question   deductible calculation
+ Ordinary question   Deductible calculation
         │                ↓
-        │        deductible-mechanics
+        │        Deductible-mechanics
         │          evidence check
         │                ↓
-        │        supplement if missing
+        │        Supplement if missing
         └───────┬────────┘
                 ↓
         Grounded Swedish LLM
                 ↓
-     answer + citations / abstention
+     Answer + citations / abstention
                 ↓
           Streamlit interface
-                ↓
+                +
              Evaluation
        ├── behavior
        ├── source-pair recall
-       ├── key-fact correctness
+       ├── key-fact recall
        └── calculation correctness
 ```
 
-## Why deterministic safeguards?
+## Deterministic safeguards
 
-Pure semantic retrieval can retrieve semantically similar but
-operationally incomplete evidence, especially for multi-part insurance
-questions.
-
-The v1 prototype therefore uses narrow deterministic safeguards where
-they are easy to justify:
+Pure semantic retrieval can retrieve semantically similar but operationally incomplete evidence, especially for multi-part insurance questions. Rather than a collection of question-specific rules, the v1 prototype therefore uses narrow deterministic safeguards where they are easy to justify:
 
 1.  **Species filtering** prevents a dog-specific question from being
     answered using cat policy terms, and vice versa.
 2.  **Deductible-mechanics supplementation** ensures that deductible
     calculations have access to both the applicable values and the rules
     describing how fixed and variable deductibles are applied.
-3.  **Conditional grounding rules** instruct the model not to turn
-    conditional policy rules into unsupported facts about a customer's
-    situation.
-4.  **Abstention** is preferred when the retrieved evidence is
+3.  **Abstention** is preferred when the retrieved evidence is
     insufficient.
-
-These safeguards are intentionally narrow rather than a collection of
-question-specific rules.
 
 ## Project structure
 
@@ -222,24 +202,22 @@ insurance-knowledge-assistant/
 │   ├── config.py
 │   ├── ingest/
 │   ├── retrieval/
-│   │   ├── retriever.py
-│   │   └── decomposed.py
 │   ├── generation/
 │   ├── evaluation/
 │   └── ui_format.py
 ├── eval/
 │   ├── golden_qa.jsonl
-│   ├── run_eval.py
-│   └── results/
+│   └── run_eval.py
 ├── scripts/
-│   └── inspect_retrieval.py
+│   ├── inspect_retrieval.py
+│   └── compare_retrieval.py
 ├── tests/
 ├── app.py
 ├── .env.example
 └── requirements.txt
 ```
 
-## Run locally
+## Run
 
 Create a virtual environment and install dependencies:
 
@@ -265,7 +243,17 @@ Build the vector index:
 PYTHONPATH=src python -m ingest.build_index
 ```
 
-Run the evaluation harness:
+Run retrieval-only diagnostics for selected questions:
+```bash
+PYTHONPATH=src python scripts/inspect_retrieval.py
+```
+
+Compare baseline dense vs decomposed retrieval:
+```bash
+PYTHONPATH=src python scripts/compare_retrieval.py
+```
+
+Run the full evaluation harness:
 
 ``` bash
 PYTHONPATH=src python eval/run_eval.py
@@ -277,43 +265,37 @@ Launch the Streamlit demo:
 streamlit run app.py
 ```
 
+![](./images/ScreenShot_UI.png)
+
 > On Windows PowerShell, set `PYTHONPATH` separately before running
 > commands if the Unix-style inline syntax is not supported.
 
-## Known limitations
+## Limitations
 
 -   The corpus and golden evaluation set are synthetic and small.
 -   Dense retrieval can miss some evidence for questions spanning
     several independent policy concepts.
--   The assistant is not connected to customer, policy, claims, or
-    pricing databases.
--   It does not make binding coverage or claims decisions.
 -   It does not replace employee verification of policy terms.
 -   The prototype has not undergone production security, privacy,
     regulatory, latency, or load testing.
--   Query decomposition exists as an experimental retrieval approach but
-    is not used by the default v1 pipeline.
 
 ## Next steps
 
-The next phase is **customer validation rather than further benchmark
-optimization**.
+The next phase is **customer validation and further benchmark optimization**.
 
 Priority activities:
 
-1.  Demonstrate the employee-facing prototype to pet-insurance
-    stakeholders.
-2.  Identify the highest-value workflow: customer service, claims
+1.  Identify the highest-value workflow: customer service, claims
     support, internal policy search, onboarding/training, or another use
     case.
-3.  Learn what document systems, auditability, permissions, security,
+2.  Learn what document systems, auditability, permissions, security,
     and response-time requirements a real insurer would impose.
-4.  Expand the evaluation set using realistic questions derived from
+3.  Expand the evaluation set using realistic questions derived from
     validated workflows.
-5.  Only then evaluate v2 improvements such as hybrid retrieval,
+4.  Evaluate v2 improvements such as BM25, hybrid retrieval,
     reranking, deterministic policy-rule extraction, enterprise document
     ingestion, authentication, and human escalation.
-6.  Explore a separate customer-facing mode only if customer discovery
+5.  Explore a separate customer-facing mode if customer discovery
     shows sufficient value and appropriate safety controls can be
     implemented.
 
