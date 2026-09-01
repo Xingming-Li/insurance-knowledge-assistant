@@ -1,9 +1,7 @@
 # NordicPaws Försäkring --- Insurance Knowledge Assistant (Pawli v1)
 
-A Swedish-language RAG demo for **pet-insurance teams**, built with
-**LangChain, OpenAI, Chroma, Streamlit, and Python**.
-
-The v1 concept is an **internal insurance knowledge copilot**: it helps
+A Swedish RAG demo for **pet-insurance teams**, built with
+**LangChain, OpenAI, Chroma, Streamlit, and Python**. The v1 concept is an **internal insurance knowledge copilot**: it helps
 customer-service and insurance staff find, interpret, and explain policy
 information with traceable source evidence. A future customer-facing
 assistant could reuse the same knowledge layer with different guardrails
@@ -83,9 +81,7 @@ knowledge-retrieval prototype, not an autonomous claims-decision system.
 
 The v1 system deliberately uses a relatively simple retrieval
 architecture rather than adding multiple LLM-based routing or reranking
-stages.
-
-The default pipeline uses:
+stages. The default pipeline uses:
 
 -   OpenAI `text-embedding-3-small` embeddings
 -   Chroma vector storage
